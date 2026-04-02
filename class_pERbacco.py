@@ -112,6 +112,63 @@ def read_graph(dname, synth_precision = "False"):
 
     return(g, graph)
 
+
+def normalize_identifier(value):
+    if value is None:
+        return ""
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+    text = str(value).strip()
+    if text == "":
+        return ""
+    try:
+        return int(text)
+    except ValueError:
+        return text
+
+
+def read_dataset_records(dname):
+    path = f"datasets/{dname}/{dname}.csv"
+    if not os.path.exists(path):
+        return {}
+
+    df_records = pd.read_csv(path, dtype=str).fillna("")
+    if len(df_records.columns) == 0:
+        return {}
+
+    first_column = df_records.columns[0]
+    if first_column != "id":
+        df_records = df_records.rename(columns={first_column: "id"})
+
+    records = {}
+    for _, row in df_records.iterrows():
+        record = {column: str(value).strip() for column, value in row.items()}
+        identifier = normalize_identifier(record.get("id"))
+        records[identifier] = record
+
+    return records
+
+
+ORACLE_STOPWORDS = {
+    "the",
+    "of",
+    "and",
+    "in",
+    "on",
+    "for",
+    "to",
+    "a",
+    "an",
+    "proceedings",
+    "proc",
+    "conference",
+    "workshop",
+    "journal",
+    "international",
+    "annual",
+    "symposium",
+}
+
 def synthetic_dataset (number_entities, size_max, recall, precision, seed = 0):
     random.seed(seed)
     np.random.seed(seed)
@@ -182,7 +239,19 @@ def synthetic_dataset (number_entities, size_max, recall, precision, seed = 0):
 
 
 class class_entity:
-    def __init__(self, dname, graph, df_ground_truth, batch_size, alg_community, mu_benefit, lambda_w):
+    def __init__(
+        self,
+        dname,
+        graph,
+        df_ground_truth,
+        batch_size,
+        alg_community,
+        mu_benefit,
+        lambda_w,
+        oracle_backend="groundtruth",
+        openai_model=None,
+        prompt_mode="zero-shot",
+    ):
 
         #graph_copy = copy.deepcopy(graph)
         self.dname = dname
@@ -195,6 +264,12 @@ class class_entity:
         self.alg_community = alg_community
         self.mu_benefit = mu_benefit
         self.lambda_w = lambda_w
+        self.oracle_backend = oracle_backend
+        self.openai_model = openai_model
+        self.prompt_mode = prompt_mode
+        self.record_index = read_dataset_records(dname)
+        self.oracle_client = None
+        self.last_query_stats = self.empty_query_stats()
 
         self.dict_entity = dict()
         self.dict_entity_belonging = dict()
@@ -242,6 +317,205 @@ class class_entity:
             data["max_weight"] = data["weight"]
 
         self.dist_matrix = None
+
+        if self.oracle_backend == "openai":
+            from oracle_LL import OpenAIEntityOracle
+
+            self.oracle_client = OpenAIEntityOracle(
+                model=self.openai_model,
+                prompt_mode=self.prompt_mode,
+            )
+
+    def empty_query_stats(self):
+        return {
+            "llm_input_tokens": 0,
+            "llm_output_tokens": 0,
+            "llm_total_tokens": 0,
+            "response_id": "",
+        }
+
+    def lookup_record(self, record_id):
+        normalized = normalize_identifier(record_id)
+        record = self.record_index.get(normalized)
+        if record is not None:
+            return record
+        return {"id": str(record_id), "note": f"raw_id={record_id}"}
+
+    def normalize_text_for_oracle(self, text):
+        text = str(text or "").lower()
+        text = re.sub(r"[^a-z0-9]+", " ", text)
+        tokens = [token for token in text.split() if token and token not in ORACLE_STOPWORDS]
+        return tokens
+
+    def extract_author_last_names(self, author_text):
+        author_text = str(author_text or "").lower()
+        author_text = re.sub(r"[^a-z,; ]+", " ", author_text)
+        segments = [segment.strip() for segment in re.split(r"\band\b|;|,", author_text) if segment.strip()]
+        surnames = []
+        for segment in segments:
+            pieces = [piece for piece in segment.split() if piece]
+            if not pieces:
+                continue
+            surname = pieces[-1]
+            if len(surname) > 1 and surname not in ORACLE_STOPWORDS:
+                surnames.append(surname)
+        return sorted(set(surnames))
+
+    def normalize_numeric_signature(self, value):
+        digits = re.findall(r"\d+", str(value or ""))
+        return "-".join(digits[:4])
+
+    def summarize_record_for_oracle(self, record):
+        title_tokens = self.normalize_text_for_oracle(record.get("title", ""))
+        venue_tokens = self.normalize_text_for_oracle(record.get("venue", ""))
+        summary = {
+            "id": str(record.get("id", "")),
+            "title": record.get("title", ""),
+            "author": record.get("author", ""),
+            "year": record.get("year", ""),
+            "venue": record.get("venue", ""),
+            "pages": record.get("pages", ""),
+            "publisher": record.get("publisher", ""),
+            "editor": record.get("editor", ""),
+            "institution": record.get("institution", ""),
+            "note": record.get("note", ""),
+            "normalized_title_tokens": title_tokens[:12],
+            "author_last_names": self.extract_author_last_names(record.get("author", ""))[:8],
+            "year_signature": self.normalize_numeric_signature(record.get("year", "")),
+            "page_signature": self.normalize_numeric_signature(record.get("pages", "")),
+            "venue_tokens": venue_tokens[:10],
+        }
+        return summary
+
+    def build_oracle_entity_payload(self, entity_id):
+        entity = self.dict_entity.get(entity_id)
+        if entity is None:
+            member_ids = [entity_id]
+        else:
+            member_ids = sorted(entity["set_entity"])
+
+        records = []
+        title_variants = set()
+        author_last_names = set()
+        year_values = set()
+        page_signatures = set()
+        venue_signatures = set()
+        for member_id in member_ids[:5]:
+            record = self.lookup_record(member_id).copy()
+            record["id"] = str(record.get("id", member_id))
+            summary = self.summarize_record_for_oracle(record)
+            records.append(summary)
+            title_variants.add(" ".join(summary["normalized_title_tokens"]))
+            author_last_names.update(summary["author_last_names"])
+            if summary["year_signature"]:
+                year_values.add(summary["year_signature"])
+            if summary["page_signature"]:
+                page_signatures.add(summary["page_signature"])
+            venue_signatures.add(" ".join(summary["venue_tokens"]))
+
+        return {
+            "entity_id": str(entity_id),
+            "entity_size": len(member_ids),
+            "normalized_title_variants": sorted(value for value in title_variants if value)[:5],
+            "author_last_names_union": sorted(author_last_names)[:12],
+            "year_signatures": sorted(year_values),
+            "page_signatures": sorted(page_signatures),
+            "venue_signatures": sorted(value for value in venue_signatures if value)[:5],
+            "records": records,
+        }
+
+    def _resolve_query_matches(self, set_query):
+        self.last_query_stats = self.empty_query_stats()
+
+        if self.oracle_backend != "openai":
+            return None
+
+        if self.oracle_client is None:
+            raise RuntimeError("OpenAI oracle backend selected, but the oracle client is not configured.")
+
+        normalized_query = sorted(set(set_query))
+        entities = [self.build_oracle_entity_payload(entity_id) for entity_id in normalized_query]
+        id_lookup = {str(entity_id): entity_id for entity_id in normalized_query}
+
+        response = self.oracle_client.resolve_batch(entities)
+        self.last_query_stats = {
+            **self.empty_query_stats(),
+            **response["usage"],
+            "response_id": response.get("response_id", ""),
+        }
+
+        match_pairs = set()
+        for cluster in response["clusters"]:
+            cluster_ids = [id_lookup[entity_id] for entity_id in cluster["entity_ids"]]
+            for left, right in itertools.combinations(cluster_ids, 2):
+                match_pairs.add(frozenset({left, right}))
+
+        return match_pairs
+
+    def entities_match(self, left, right, match_pairs=None):
+        if self.oracle_backend == "openai":
+            return frozenset({left, right}) in (match_pairs or set())
+        return left in self.dict_ground_truth[right]
+
+    def compute_predicted_pairs(self):
+        total_predicted = 0
+        for key in self.dict_entity.keys():
+            nodes_key = len(self.dict_entity[key]["set_entity"])
+            total_predicted += int(nodes_key * (nodes_key - 1) / 2)
+        return total_predicted
+
+    def compute_metrics(self):
+        true_positive_pairs = 0
+        predicted_pairs = 0
+        for entity in self.dict_entity.values():
+            members = sorted(entity["set_entity"])
+            predicted_pairs += int(len(members) * (len(members) - 1) / 2)
+            for left, right in itertools.combinations(members, 2):
+                if left in self.dict_ground_truth[right]:
+                    true_positive_pairs += 1
+
+        recall = true_positive_pairs / len(self.df_ground_truth)
+        if predicted_pairs == 0:
+            precision = 1.0
+        else:
+            precision = true_positive_pairs / predicted_pairs
+
+        return {
+            "recall": recall,
+            "precision": precision,
+            "true_positive_pairs": true_positive_pairs,
+            "predicted_pairs": predicted_pairs,
+        }
+
+    def build_estimation_batches(self, batch_size):
+        if self.oracle_client is None:
+            return {}
+
+        nodes = sorted(self.graph.nodes())
+        if len(nodes) == 0:
+            return {}
+
+        scored_nodes = []
+        for node in nodes:
+            payload = self.build_oracle_entity_payload(node)
+            score = len(json.dumps(payload, ensure_ascii=True))
+            scored_nodes.append((score, node))
+
+        scored_nodes.sort(key=lambda item: item[0])
+        positions = {
+            "low": int(0.25 * (len(scored_nodes) - 1)),
+            "avg": int(0.50 * (len(scored_nodes) - 1)),
+            "high": int(0.75 * (len(scored_nodes) - 1)),
+        }
+
+        estimates = {}
+        for label, index in positions.items():
+            start = max(0, min(index - batch_size // 2, len(scored_nodes) - batch_size))
+            selection = [node for _, node in scored_nodes[start : start + batch_size]]
+            entities = [self.build_oracle_entity_payload(node) for node in selection]
+            estimates[label] = self.oracle_client.estimate_batch_tokens(entities)
+
+        return estimates
 
 
     # Compute the weight of a set (the sum of all weights)
@@ -318,6 +592,7 @@ class class_entity:
         # SKIP (THE LAST BATCH OF A COMMUNITY WHOSE LENGHT IS DIFFERENT TO batch_size), 
         # AND LAST FOR THE FINAL COMMUNITY
         #print()
+        self.last_query_stats = self.empty_query_stats()
 
         # old_entities contains all entities that are already visited
         old_entities = set()
@@ -335,6 +610,7 @@ class class_entity:
                 old_entities.add(v)
 
         if type_query in ["entity", "batch"]:
+            match_pairs = self._resolve_query_matches(set_query)
 
             for (x,y) in itertools.combinations(set_query, 2):
 
@@ -371,7 +647,7 @@ class class_entity:
 
                     # match-case
 
-                    if u in self.dict_ground_truth[v]:
+                    if self.entities_match(u, v, match_pairs):
 
                         # merge u and v into u, then delete v
                         self.dict_entity[u] = {"set_entity" : self.dict_entity[u]["set_entity"] | self.dict_entity[v]["set_entity"], 
@@ -570,6 +846,8 @@ class class_entity:
             self.df_benefit = pd.concat([self.df_benefit, df_benefit_concat], ignore_index=False) 
 
             self.df_benefit = self.df_benefit.sort_values(by = "benefit", ascending=False, ignore_index=False)     
+
+        return self.last_query_stats
 
     # Information (number of nodes, edge, weight, degrees list, matching and percentage wrt number of edges, number of entities)
     def info_plot_community (self, comm, plot = True):
@@ -989,12 +1267,8 @@ class class_entity:
 
     # compute the recall and the number of found matchings
     def compute_recall(self):
-        total_match = 0
-        for key in self.dict_entity.keys():
-            nodes_key = len(self.dict_entity[key]["set_entity"])
-            total_match += int(nodes_key*(nodes_key-1)/2) 
-        recall = total_match/len(self.df_ground_truth)
-        return(recall, total_match)
+        metrics = self.compute_metrics()
+        return(metrics["recall"], metrics["true_positive_pairs"])
 
     # check if the nodes in the new batch are in the same community of the previous batch
     # Attention! Use only for batch queries
@@ -1059,10 +1333,6 @@ class class_entity:
         G_ig.es['weight'] = weights
 
         self.igraph = G_ig
-
-
-
-
 
 
 
