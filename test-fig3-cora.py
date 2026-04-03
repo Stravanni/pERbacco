@@ -1,6 +1,7 @@
 import argparse
 import csv
 import importlib.util
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -110,7 +111,11 @@ def sanitize_label(value):
     return str(value).replace("/", "-").replace(" ", "-").replace(":", "-")
 
 
-def build_llm_filename(model, prompt_mode, max_llm_calls):
+MAX_QUERY_PATTERN = re.compile(r"^PRINT max_query for\s+\S+\s+and batch_size\s+\d+\s+(\d+)\s*$")
+QUERY_PROGRESS_PATTERN = re.compile(r"^(?P<current>\d+)/(?P<total>\d+)\s")
+
+
+def build_llm_filename(model, prompt_mode):
     parts = [
         f"{DATASET}_LLM-pERbacco",
         str(BATCH_SIZE),
@@ -119,20 +124,20 @@ def build_llm_filename(model, prompt_mode, max_llm_calls):
         sanitize_label(model),
         prompt_mode,
     ]
-    if max_llm_calls is not None:
-        parts.append(f"cap{max_llm_calls}")
     return f"{','.join(parts)}.csv"
 
 
 def build_methods(args):
-    methods = list(BASE_METHODS)
+    methods = [dict(method, marker=None) for method in BASE_METHODS]
     if args.include_llm:
         methods.append(
             {
                 "label": f"LLM-{args.prompt_mode}",
                 "color": "black",
-                "linestyle": (0, (3, 1, 1, 1)),
-                "filename": build_llm_filename(args.openai_model, args.prompt_mode, args.max_llm_calls),
+                "linestyle": "-",
+                "marker": "o",
+                "track_query_progress": True,
+                "filename": build_llm_filename(args.openai_model, args.prompt_mode),
                 "args": [
                     "--alg_community",
                     "louvain",
@@ -150,8 +155,6 @@ def build_methods(args):
                     args.openai_model,
                     "--prompt_mode",
                     args.prompt_mode,
-                    "--max_llm_calls",
-                    str(args.max_llm_calls),
                 ],
             }
         )
@@ -256,6 +259,8 @@ def compute_phi(dataset_dir, batch_size):
 
 
 def run_method(method, force):
+    from tqdm import tqdm
+
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     output_path = RESULTS_DIR / method["filename"]
     if output_path.exists() and not force:
@@ -271,8 +276,77 @@ def run_method(method, force):
         str(BATCH_SIZE),
         *method["args"],
     ]
+    print(f"Starting {method['label']}: {output_path}", flush=True)
     print("Running:", " ".join(command), flush=True)
-    subprocess.run(command, check=True)
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    query_bar = None
+    last_query_value = 0
+    try:
+        assert process.stdout is not None
+        for raw_line in process.stdout:
+            line = raw_line.rstrip()
+            if not line:
+                continue
+            tqdm.write(line)
+
+            if not method.get("track_query_progress"):
+                continue
+
+            max_query_match = MAX_QUERY_PATTERN.match(line)
+            if max_query_match is not None:
+                total = int(max_query_match.group(1))
+                if query_bar is None:
+                    query_bar = tqdm(
+                        total=total,
+                        desc=f"{method['label']} queries",
+                        unit="query",
+                        leave=False,
+                        dynamic_ncols=True,
+                    )
+                else:
+                    query_bar.total = total
+                    query_bar.refresh()
+                continue
+
+            query_progress_match = QUERY_PROGRESS_PATTERN.match(line)
+            if query_progress_match is None:
+                continue
+
+            current = int(query_progress_match.group("current"))
+            total = int(query_progress_match.group("total"))
+            if query_bar is None:
+                query_bar = tqdm(
+                    total=total,
+                    desc=f"{method['label']} queries",
+                    unit="query",
+                    leave=False,
+                    dynamic_ncols=True,
+                )
+            elif query_bar.total != total:
+                query_bar.total = total
+
+            increment = current - last_query_value
+            if increment > 0:
+                query_bar.update(increment)
+                last_query_value = current
+            query_bar.refresh()
+    finally:
+        if query_bar is not None:
+            query_bar.close()
+
+    return_code = process.wait()
+    if return_code != 0:
+        raise subprocess.CalledProcessError(return_code, command)
+
+    print(f"Completed {method['label']}: {output_path}", flush=True)
     return output_path
 
 
@@ -306,6 +380,7 @@ def build_plot(phi, max_query, methods):
             label=method["label"],
             color=method["color"],
             linestyle=method["linestyle"],
+            marker=method.get("marker"),
             linewidth=2,
         )
 
@@ -362,16 +437,12 @@ def parse_cli_args():
         default="zero-shot",
         help="Prompting mode for the LLM-backed line.",
     )
-    parser.add_argument(
-        "--max-llm-calls",
-        type=int,
-        default=50,
-        help="Stop the LLM-backed run after this many calls.",
-    )
     return parser.parse_args()
 
 
 def main():
+    from tqdm import tqdm
+
     args = parse_cli_args()
     ensure_dependencies()
 
@@ -383,8 +454,11 @@ def main():
         print(f"Warning: computed phi_{BATCH_SIZE} for {DATASET} is {phi}, expected 137.")
 
     if not args.skip_run:
-        for method in methods:
-            run_method(method, force=args.force)
+        with tqdm(total=len(methods), desc="Methods", unit="run", dynamic_ncols=True) as method_bar:
+            for method in methods:
+                method_bar.set_postfix_str(method["label"])
+                run_method(method, force=args.force)
+                method_bar.update(1)
 
     missing_outputs = [
         str(RESULTS_DIR / method["filename"])

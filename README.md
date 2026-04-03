@@ -78,6 +78,12 @@ python3 perbacco.py \
 
 The script prints a preflight token estimate before the first API call, then reports progress, recall, precision, and token usage after each query.
 
+To warm up the state with the first 5 batches resolved from ground truth and only call the LLM afterwards, add:
+
+```bash
+  --skip-batches 5
+```
+
 ### pERbac
 
 To run **pERbac** on a given dataset with batch size `batch_size`, execute:

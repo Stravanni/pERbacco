@@ -629,22 +629,6 @@ class class_entity:
                     v = self.dict_entity_belonging[y]
 
                 if u != v:
-                    if type_query == "entity":
-                        possible_match = False
-                        uv = {u,v}
-                        uv_row = list(self.dict_row_df_benefit[u] & self.dict_row_df_benefit[v])
-
-                        if len(uv_row) > 0:
-                            possible_match = True
-                            if len(uv_row) > 1:
-                                print("u,v ",u,v)
-                                print(uv_row)
-                                ERROR
-                            else:
-                                uv_row = uv_row[0]
-                            #prob_uv = self.df_benefit.loc[uv_row, "prob"]
-                            benefit_uv = self.df_benefit.loc[uv_row, "benefit"]
-
                     # match-case
 
                     if self.entities_match(u, v, match_pairs):
@@ -1333,6 +1317,5 @@ class class_entity:
         G_ig.es['weight'] = weights
 
         self.igraph = G_ig
-
 
 

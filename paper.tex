@@ -1,0 +1,1530 @@
+% VLDB template version of 2020-08-03 enhances the ACM template, version 1.7.0:
+% https://www.acm.org/publications/proceedings-template
+% The ACM Latex guide provides further information about the ACM template
+
+\documentclass[sigconf, nonacm]{acmart}
+
+
+
+\usepackage[linesnumbered,ruled,vlined]{algorithm2e}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{booktabs}
+\usepackage[normalem]{ulem}
+\usepackage{arydshln}
+\usepackage{graphicx}
+\usepackage{subcaption}  % per le subfigure
+\usepackage{wrapfig}
+
+\usepackage{enumitem}
+
+\usepackage{amsthm}
+
+\newcommand{\oracle}{\textit{Oracle}\xspace}
+\newcommand{\density}{\textit{density}\xspace}
+\newcommand{\resolution}{\textit{resolution}\xspace}
+\newcommand{\window}{b}
+\newcommand{\weight}{\textit{weight}\xspace}
+\newcommand{\nweight}{\textit{nweight}\xspace}
+\newcommand{\recall}{\textit{recall}\xspace}
+\newcommand{\surplus}{\textit{surplus}\xspace}
+\newcommand{\argmax}{\textit{argmax}}
+\newcommand{\benefit}{\textit{benefit}\xspace}
+\newcommand{\query}{\textit{query}\xspace}
+\newcommand{\gain}{\textit{gain}\xspace}
+\newcommand{\match}{\textit{Match}\xspace}
+
+\newcommand{\DD}{\texttt{Oracle}\xspace}
+\newcommand{\subopt}{\texttt{SubOpt}\xspace}
+\newcommand{\perbacco}{\texttt{pERbacco}\xspace}
+\newcommand{\perbac}{\texttt{pERbac}\xspace}
+
+
+\newcommand{\cora}{\texttt{Cora}\xspace}
+\newcommand{\camera}{\texttt{Camera}\xspace}
+\newcommand{\funding}{\texttt{Funding}\xspace}
+\newcommand{\voters}{\texttt{Voters}\xspace}
+\newcommand{\wdc}{\texttt{WDC-80}\xspace}
+\newcommand{\synth}{\texttt{Synth10k}\xspace}
+
+
+\newcommand{\blue}[1]{\textcolor{blue}{#1}}
+\newcommand{\red}[1]{\textcolor{red}{#1}}
+
+
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}{Lemma}[section]
+\newtheorem{problem}{Problem}
+\newtheorem{example}{Example}
+
+
+\newenvironment{Definition}[1][Definition]
+{%
+    \noindent\textbf{#1:}\quad
+}
+{%
+    \vspace{0.5em}
+}
+
+%% The following content must be adapted for the final version
+% paper-specific
+\newcommand\vldbdoi{XX.XX/XXX.XX}
+\newcommand\vldbpages{XXX-XXX}
+% issue-specific
+\newcommand\vldbvolume{14}
+\newcommand\vldbissue{1}
+\newcommand\vldbyear{2020}
+% should be fine as it is
+\newcommand\vldbauthors{\authors}
+\newcommand\vldbtitle{\shorttitle} 
+% leave empty if no availability url should be set
+\newcommand\vldbavailabilityurl{URL_TO_YOUR_ARTIFACTS}
+% whether page numbers should be shown or not, use 'plain' for review versions, 'empty' for camera ready
+\newcommand\vldbpagestyle{plain} 
+
+\begin{document}
+\title{Entity Resolution via Batched Oracle Queries}
+
+%%
+%% The "author" command and its associated commands are used to define the authors and their affiliations.
+\author{Lorenzo Balzotti}
+\affiliation{%
+  \institution{Sapienza Università di Roma}
+  \state{Italy}
+}
+\email{lorenzo.balzotti@uniroma1.it}
+
+\author{Donatella Firmani}
+\affiliation{%
+  \institution{Sapienza Università di Roma}
+  \state{Italy}
+}
+\email{donatella.firmani@uniroma1.it}
+
+\author{Luca Gagliardelli}
+\affiliation{%
+  \institution{Università eCampus}
+  \state{Italy}
+}
+\email{luca.gagliardelli@uniecampus.it}
+
+\author{Giovanni Simonini}
+\affiliation{%
+  \institution{Univ. of Modena and Reggio Emilia}
+  \state{Italy}
+}
+\email{simonini@unimore.it}
+
+
+%%
+%% The abstract is a short summary of the work to be presented in the
+%% article.
+\begin{abstract}
+We consider an oracle that processes a limited batch of records at a time and clusters those that refer to the same real-world entity.
+We study how to interrogate such an oracle to resolve entities in a dataset whose size is far larger than a single batch, and where no batch is guaranteed to contain all records of any given entity. %\red{perché? Ci possono essere entità piccole con pochi doppioni}
+We aim at a pay-as-you-go approach, to have full control over the costs (the number of oracle consults), while achieving the highest possible recall at every step.
+% To have full control over the costs of consulting the oracle, the batches have to be presented to it progressively.
+% while achieving the highest possible recall at every step.
+We formally cast this problem as \textit{batched entity resolution}, prove that selecting optimal batches is NP-hard, and provide an optimal solution under a natural contrast assumption. 
+%Finally, we evaluate our approach on eight real-world datasets, demonstrating its efficacy and superiority over adapted state-of-the-art baselines.
+Finally, we evaluate our approach on six datasets and show its superiority over state-of-the-art baselines.
+\end{abstract}
+
+\maketitle
+
+%%% do not modify the following VLDB block %%
+%%% VLDB block start %%%
+\pagestyle{\vldbpagestyle}
+\begingroup\small\noindent\raggedright\textbf{PVLDB Reference Format:}\\
+\vldbauthors. \vldbtitle. PVLDB, \vldbvolume(\vldbissue): \vldbpages, \vldbyear.\\
+\href{https://doi.org/\vldbdoi}{doi:\vldbdoi}
+\endgroup
+\begingroup
+\renewcommand\thefootnote{}\footnote{\noindent
+This work is licensed under the Creative Commons BY-NC-ND 4.0 International License. Visit \url{https://creativecommons.org/licenses/by-nc-nd/4.0/} to view a copy of this license. For any use beyond those covered by this license, obtain permission by emailing \href{mailto:info@vldb.org}{info@vldb.org}. Copyright is held by the owner/author(s). Publication rights licensed to the VLDB Endowment. \\
+\raggedright Proceedings of the VLDB Endowment, Vol. \vldbvolume, No. \vldbissue\ %
+ISSN 2150-8097. \\
+\href{https://doi.org/\vldbdoi}{doi:\vldbdoi} \\
+}\addtocounter{footnote}{-1}\endgroup
+%%% VLDB block end %%%
+
+%%% do not modify the following VLDB block %%
+%%% VLDB block start %%%
+\ifdefempty{\vldbavailabilityurl}{}{
+\vspace{.3cm}
+\begingroup\small\noindent\raggedright\textbf{PVLDB Artifact Availability:}\\
+The source code, data, and/or other artifacts have been made available at \url{\vldbavailabilityurl}.
+\endgroup
+}
+
+
+\section{Batched Entity Resolution}
+
+Entity Resolution (ER) is the task of identifying records that refer to the same real-world entity (in other words: that \emph{match}).
+It is central to data integration and knowledge base construction, and a core challenge in large-scale data management.
+
+
+State-of-the-art ER systems~\cite{DBLP:journals/csur/ChristophidesEP21, DBLP:journals/vldb/LiLSDT23, papadakis_exploration} rely on a common abstraction: a \emph{binary matching function} that takes two records as input and returns a match or non-match decision.
+This pairwise abstraction underlies classical rule-based approaches, supervised learning methods~\cite{DBLP:journals/is/Mandilaras0GSTG21, DBLP:journals/cacm/DoanKCGPCMC20}, and recent neural models~\cite{DBLP:journals/vldb/LiLSDT23}.
+As a result, ER pipelines are typically organized around pairwise comparisons, whose number grows quadratically with the dataset size.
+For large collections, controlling this cost is therefore a primary concern, motivating extensive work on blocking~\cite{DBLP:journals/is/Mandilaras0GSTG21, javdani2019deepblock}, and prioritization techniques~\cite{DBLP:journals/tkde/WhangMG13, DBLP:conf/internetware/YuHZLS20, DBLP:journals/tkde/SimoniniPPB19, papadakis_exploration, firmani2016online} to reduce the number of comparisons.
+
+% While pairwise matching has been the dominant abstraction, many modern resolution mechanisms naturally operate at a higher level.
+% In several domains, the basic unit of computation is not a record pair, but a \emph{bounded set} of items that is jointly analyzed to infer a clustering structure.
+%%%%
+% While pairwise matching has been the dominant abstraction for decades~\cite{fellegi1969theory}, emerging ER models naturally operate at a higher level.
+% Rather than evaluating individual record pairs, these models take as input a \emph{batch} of records and jointly analyze them to produce a clustering, implicitly resolving all pairwise relationships within the set and avoiding the repeated processing of the same records required by pairwise pipelines.
+% For example, clustering a set of $b$ records reveals the match status of all $\binom{k}{2}$ induced record pairs in a single invocation.
+% While pairwise matching has been the dominant abstraction for over half a century~\cite{fellegi1969theory}, many modern approaches~\cite{DBLP:conf/icml/LeeLKKCT19, DBLP:conf/coling/WangCLCHSWZ25, crowder, DBLP:conf/cvpr/SchroffKP15} naturally operate at a higher level.
+% Rather than evaluating individual pairs, these approaches take as input a \emph{batch} of items and jointly analyze them to produce a clustering, implicitly resolving all pairwise relationships within the set.
+% %For example, clustering a set of $b$ items reveals the match status of all $\binom{b}{2}$ induced pairs in a single invocation.
+% In such models, processing a batch incurs a cost that scales with the batch size $b$, while the resulting clustering can simultaneously determine the match status of all $\binom{b}{2}$ induced pairs.
+While pairwise matching has been the dominant abstraction for over half a century~\cite{fellegi1969theory}, many modern approaches~\cite{DBLP:conf/icml/LeeLKKCT19, DBLP:conf/coling/WangCLCHSWZ25, crowder, DBLP:conf/cvpr/SchroffKP15} operate at a higher level of granularity by jointly analyzing a \emph{batch} of items to produce a clustering.
+In such models, the cost of processing a batch typically scales with the batch size $b$, while a single clustering result can resolve the match status of all $\binom{b}{2}$ record pairs induced by the batch.
+
+
+
+For instance, \emph{Set Transformer} architectures~\cite{DBLP:conf/icml/LeeLKKCT19} can be used to learn permutation-invariant embeddings of the elements in a batch, followed by a clustering head that assigns (entity) group memberships based on joint reasoning over a set of records.
+Similarly, vision-based face and identity clustering systems process bounded collections of images (e.g., photo albums) and directly group them into entity clusters without decomposing the task into independent pairwise decisions~\cite{DBLP:conf/cvpr/SchroffKP15}.
+In human-in-the-loop settings, crowdsourcing-based ER approaches often present workers with small groups of records and ask them to cluster the records directly, implicitly leveraging transitivity and global context~\cite{waldo, crowder}.
+Also Large Language Models (LLMs)~\cite{DBLP:journals/corr/abs-2203-02155} provide a further example of this paradigm:
+an LLM can be prompted with a batch of records and asked to jointly analyze them, performing ER by returning a clustering of the input~\cite{DBLP:conf/coling/WangCLCHSWZ25}.
+
+These models act as \emph{oracles} operating under inherent constraints: LLMs face context window limits and per-token costs; crowdsourcing systems must present workers with manageable tasks; neural models process fixed-size batches. 
+In all cases, budget constraints (monetary, computational, or human) make it infeasible to exhaustively query the entire dataset in a single step.
+This naturally aligns with the \emph{pay-as-you-go} paradigm~\cite{DBLP:journals/tkde/WhangMG13}: progressively improve resolution quality while maintaining control over costs.
+
+
+% In practical deployments, LLMs operate under a \emph{pay-per-token} cost model, where the cost of a query scales with the size of the input and output.
+% Under this model, decomposing ER into a sequence of pairwise queries can be inefficient, as the same records are repeatedly processed across multiple calls.
+
+% \begin{example}[Token inefficiency of pairwise ER]
+% Consider a set of four records $\{r_1, r_2, r_3, r_4\}$, each represented by 100 tokens.
+% Assume access to an oracle that can process at most 400 tokens per query.
+% A pairwise ER pipeline issues six separate queries, each comparing two records, resulting in a total of $1{,}200$ processed record tokens.
+% In contrast, the same four records can be jointly analyzed in a single batched query, requiring only 400 processed tokens.
+% \end{example}
+
+% These observations motivate a shift in abstraction.
+% Instead of querying whether two records match, we consider queries over \emph{batches} of records, where a single query returns a clustering of the batch into entities.
+% This abstraction captures a wide range of resolution mechanisms, including set-based neural models, crowdsourcing, and LLMs, while remaining independent of any specific implementation.
+
+% In real-world applications, access to such an oracle is typically constrained by a limited budget, such as monetary cost or human effort, making it infeasible to exhaustively query all possible batches.
+%This naturally aligns with the \emph{pay-as-you-go} paradigm~\cite{DBLP:journals/tkde/WhangMG13}, where the goal is to progressively improve resolution quality while maintaining explicit control over cost.
+
+The main challenge in this setting becomes to determine how to allocate the available budget so as to maximize the benefit (e.g., recall) obtained at each step.
+Unlike pairwise ER where the search space is well-understood~\cite{papadakis_exploration}, batched ER involves exponentially many possible batch selections, and the benefit of querying a batch depends on all previous queries.
+
+To study this problem in a model-agnostic manner, we abstract the resolution mechanism as an oracle that, given a bounded-size set (a batch) of records, returns a partition of that set into clusters corresponding to real-world entities.
+At any point during the resolution process, the task is therefore to decide which batch of records should be queried next so as to maximize the number of matches discovered for the budget spent so far.
+We refer to this task as \emph{progressive batched entity resolution} and assume a consistent oracle that returns only correct match decisions.
+
+We note that this abstraction deliberately idealizes the behavior of the oracle.
+Handling noisy or inconsistent oracle outputs (e.g., errors arising from human annotation or imperfect models) is an important and challenging problem in its own right, and has been studied extensively in the context of crowdsourced ER~\cite{crowd_error_01,crowd_error_02,crowd_error_03,crowd_error_04}.
+In this work, we focus on the algorithmic problem of allocating oracle queries under budget constraints, and leave robustness to oracle errors to future work.
+
+
+
+%In this paper, we formalize this abstraction, analyze its computational properties, and design algorithms that exploit it.
+%By moving beyond the strictly pairwise paradigm, we enable dataset-level strategies that can extract substantially more information per query under fixed budget
+
+\smallskip
+\noindent\textbf{Contributions.}
+By moving beyond the strictly pairwise paradigm, this work makes the following contributions:
+\begin{itemize}[leftmargin=*, itemsep=0pt, topsep=0pt]
+    \item A formal definition of the \emph{progressive batched entity resolution} problem, where an oracle jointly resolves batches of records and the objective is to progressively maximize resolution quality under a limited budget of oracle calls.
+    %\item A proof that selecting an optimal sequence of batches is NP-hard, establishing the intrinsic computational difficulty of allocating oracle queries at the dataset level.
+    \item A proof that an optimal sequence of batches does not always exist, and that maximizing the matches at each query is NP-hard, establishing the intrinsic computational difficulty of allocating oracle queries at the dataset level. This result generalizes the known findings for pairwise ER.
+    \item An approximate solution that guides batch selection so as to maximize the benefit (number of newly discovered matches) obtained at each oracle invocation.
+    \item An experimental evaluation on real-world and synthetic datasets, showing the effectiveness of the proposed approach and its superiority over state-of-the-art baselines under comparable budgets.
+\end{itemize}
+
+
+
+\smallskip
+\noindent\textbf{Paper organization}
+Section~\ref{sec:theoretical_results} presents formal problem definitions and theoretical results including NP-hardness proofs and query bounds. 
+Section~\ref{sec:perbacco} describes our \perbacco algorithm. 
+Section~\ref{sec:experiments} presents experimental evaluation.
+Section~\ref{sec:related_work} discusses related work, and Section~\ref{sec:conclusions} concludes.
+
+
+\section{Preliminaries and theoretical results}\label{sec:theoretical_results}
+
+In this section, we provide the description of the main problems we deal with, which are the entity resolution via \emph{batched queries}, and its progressive version, see Problem~\ref{prob:batch_entity_resolution_BER} and Problem~\ref{prob:PBER}, respectively. Then, in Subsection~\ref{sub:BER_NP-hard} and Subsection~\ref{sub:PBER_NP-hard} we prove the NP-hardness of both problems. In Subsection~\ref{sub:bounds_minimum_number_of_queries} we show upper and lower bounds for the minimum number of queries for Problem~\ref{prob:batch_entity_resolution_BER}, and, finally, in Subsection~\ref{sub:optimal_solution} we describe the optimal solution for both problems in some special cases.
+
+
+\subsection{Problem Definition}\label{sub:problems}
+
+The input is a dataset $R$ in which different records may represent the same entity. If two records $r,r'$ represent the same entity, we say that $r$ \emph{matches} $r'$. 
+Let us denote by $\sim$ the \emph{match} relation. Accordingly, for $r,r'\in R$, we write $r\sim r'$ if and only if $r$ matches $r'$. Note that $\sim$ is reflexive, symmetric, and transitive, thus it is an equivalence relation. Let us denote by $\not\sim$ the \emph{non-match} relation, which denotes two records that don't match each other. Observe that $\not\sim$ is not a relation of equivalence, as it is not reflexive.
+
+We assume access to an oracle
+$
+\oracle : R^b \to \{\text{\emph{0}}, \text{\emph{1}}\}^{\binom{b}{2}},
+$
+which, given a batch $B \subseteq R$ of $b \ge 2$ records, returns a match/non-match decision for every unordered pair of records in $B$. 
+In other words, a single oracle query over a batch provides complete pairwise matching information within that batch.
+  
+Let $Q = (q_1, q_2,\ldots,q_T)$ be a sequence of batch queries. 
+We denote by $\sim_Q$ the equivalence relation induced by the match information obtained from the queries in $Q$; that is, for $r,r' \in R$, we write $r \sim_Q r'$ if the \oracle answers to the queries in $Q$ allow us to infer that $r$ matches $r'$.
+Let $Repr_Q = R/\sim_Q$ be the quotient set of the record set $R$ by $\sim_Q$, and let $[r]_\sim$ denote the equivalence class of $r$. 
+If, based on the answers to the queries in $Q$, we can infer that two representatives $r,r' \in Repr_Q$ do not match, we write $r \not\sim_Q r'$ (and $r' \not\sim_Q r$).
+Note that $\not\sim_Q$ is not an equivalence relation. Moreover, two relations $\sim_1$ and $\sim_2$ are considered equivalent if they coincide on all pairs, and we write $\sim_1 = \sim_2$. 
+
+To better illustrate this notation, let us show two opposite examples. 
+If $Q=\emptyset$, then $[r]_{\sim_Q} = \{r\}$ for each record $r$, and there not exist two records $r,r'$ such that $r\not\sim_Q r'$. Conversely, if $Q$ contains all pairs in ${R\choose 2}$, then $\sim_Q = \sim$, and $r' \in [r]_Q$ if and only if $r'\sim r$. 
+We are now ready to formalize the entity resolution problem via batch queries.
+
+Given an integer $b$, we define a \emph{$b$-batch} as a batch containing at most $b$ records.
+
+
+\begin{problem}\label{prob:batch_entity_resolution_BER}[Batched Entity Resolution]
+    Given a set of records $R$, an oracle accessing to $\sim$, an integer $b$, find a minimal sequence $Q$ of $b$-batches such that $\sim_Q = \sim$ and $\not\sim_Q =\not\sim$.   
+\end{problem}
+
+
+%{\color{blue} Non metto le proprietà di Swoosh perché quelle che ci interessano sono già incluse nella definizione di relazione di equivalenza. Ovvero ometto le proprietà del merge che dati due record te ne restituisce un terzo che è il rappresentante. Quindi il loro problema di ER è leggermente diverso dal nostro. Inoltre Swoosh assume che la funzione di match e di merge siano univoche. Tra l'altro Swoosh usa il simbolo $\approx$ che ricorda il simbolo $\sim$.}
+
+Given a sequence of batches $Q = (q_1,q_2,\ldots,q_T)$, we define $\match_Q$ as the number of match edges discovered by $Q$. Moreover, for $t\leq T$, we denote by $Q_t$ the subsequence $(q_1,q_2,\ldots,q_t)$.
+
+\begin{definition}
+    Let $R$ be a set of records, $b$ an integer, $Q$ a sequence of $T$ $b$-batches. We say that $Q$ is a \emph{$b$-optimal for $R$} if
+    \begin{itemize}
+        \item for any sequence $Q'$ of $b$-batches, $\match_{Q_t}  \geq \match_{Q'_t}$, for all $t\leq T$,
+        \item $\match_{Q}$ equals the number of match edges in $R$.
+    \end{itemize}
+\end{definition}
+
+%\blue{In what follows, if we are not interested in specifying $Q$, or it is clear from the context, then we easily omit it. }
+
+
+\begin{theorem}\label{th:b_optimal_solution_not_exist}
+    A $b$-optimal solution for $R$ does not always exist for every integer $b$ and set of records $R$.
+\end{theorem}
+\begin{proof}
+    Let $b=5$ and $R$ a set of 7 entities, three of which are of size 3 and four of size 2. It is simply to construct two sequences $Q$ and $Q'$ of $5$-batches satisfying $\match_{Q_1} = \match_{Q'_1} = 4$, $\match_{Q_2} = 8 < 9 = \match_{Q'_2}$, $\match_{Q_3} = 12 > 11 = \match_{Q'_3}$, and $\match_{Q_4} = \match_{Q'_4} = 13$. Since the number of match edges is 13, and there doesn't exist $Q''$ satisfying $\match_{Q''_1} \geq 4$, $\match_{Q''_2} \geq 9$, $\match_{Q''_1} \geq 12$, then the thesis holds.  
+\end{proof}
+
+Since a $b$-optimal solution cannot always be guaranteed, we aim to maximize the increase in match edges at each query in a progressive manner.
+
+
+\begin{problem}[Progressive Batched Entity Resolution]\label{prob:PBER}
+    Given a set of records $R$, an integer $b$, and a set of queries $Q$, find a $b$-batch $q$ that maximizes $\match_{Q \cup q}$.
+\end{problem}
+
+
+
+\subsection{Batched Entity Resolution is NP-hard}\label{sub:BER_NP-hard}
+
+To prove that Problem~\ref{prob:batch_entity_resolution_BER} is NP-hard, we first introduce the \emph{bin packing problem} (also known as the \emph{one-dimensional cutting stock problem}), which is a classical NP-hard problem~\cite{gilmore1961linear}. The bin packing problem can be stated as follows.
+
+\begin{problem}[Bin packing problem]\label{prob:bin}
+    Given a set $I$ of items, a size $s(i) \in \mathbb{N}$ for each $i \in I$, a positive integer bin capacity $b$, and a positive integer $\ell$. Find the minimum value $\ell$ such that there exists a partition of $I$ into disjoint sets $I_1,\dots, I_\ell$ such that the sum of the sizes of the items in each $I_j$ is $b$ or less.
+\end{problem}
+
+
+\begin{theorem}\label{th:batch_ER_is_NP-hard}
+    Problem~\ref{prob:batch_entity_resolution_BER} is NP-hard.
+\end{theorem}
+\begin{proof}
+    We prove that Problem~\ref{prob:batch_entity_resolution_BER} is at least as difficult as Problem~\ref{prob:bin} by presenting a particular instance of Problem~\ref{prob:batch_entity_resolution_BER} that is equivalent to Problem~\ref{prob:bin}. Let us assume that $b$ is greater than the maximum cardinality of any entity, and that all entities can be partitioned into $t$ sets $S=\{S_1,\ldots,S_t\}$ so that the sum of the cardinalities of the entities in each set is \emph{exactly}  $b$. Then, any solution to Problem~\ref{prob:batch_entity_resolution_BER} corresponds to a solution of Problem~\ref{prob:bin}, where the items are the entities and the bin capacity is $b$.
+\end{proof}
+
+
+\subsection{Minimum Number of Queries}\label{sub:bounds_minimum_number_of_queries}
+
+In this subsection, we focus on upper and lower bounds for the minimum number of queries required to discover all match edges in Problem~\ref{prob:batch_entity_resolution_BER}. 
+Indeed, in a progressive approach, only the optimization of match edges is considered, not that of non-match edges.
+It can be proved similarly to Theorem~\ref{th:batch_ER_is_NP-hard} that finding this number is an NP-hard problem. 
+These bounds are theoretically significant, and our experiments in Section~\ref{sec:experiments} show that they provide estimates on real datasets with an error below 3\% (see Table~\ref{tab:upper_lower_bound}). 
+We remark that the upper bound requires the solution of an instance of the bin packing problem, while the lower bound can be computed in $O(|R|)$ time. 
+Therefore, the lower bound is not only efficient to compute but also a tight approximation of the true value.
+
+%Let $\mathcal{E}$ denote the set of all entities,  $e_1, \ldots e_s$ denote the entities in non-increasing order of size. We first need to understand the minimum number of batches we need to discover all matches for an entity.
+
+First, we determine the minimum number of $b$-batches required to discover all matches for a single entity. Let's start with an example. Let $e = \{r_1,\ldots, r_8\}$ be an entity of 8 records, and let us assume that $b = 3$. To find all matches in $e$, four $3$-batches are required.
+Indeed, we can start by querying the \oracle with the $3$-batches $\{r_1,r_2,r_3\}$ and $\{r_4,r_5,r_6\}$. After this, we have only two records not already visited, $r_7$ and $r_8$, 
+but at least one record from the first $3$-batch must be compared with one from the second $3$-batch. Thus, the following batch can be $\{r_1,r_4,r_7\}$. After this, by transitivity, we know that all records $r_1,\ldots,r_7$ match each other. Finally, we need a last $3$-batch containing a record among $r_1,\ldots,r_7$ and $r_8$. No solution uses fewer than three $3$-batches full and one with only two records.
+
+We want to generalize the example. We need some definitions.
+
+\begin{definition}\label{def:recursive_modulo}
+    Let $x$ and $b$ be two positive integers. We define the \emph{recursive rest of $x$ modulo $b$} as
+    \begin{equation}
+        r^{rec}_b(x) = 
+        \begin{cases}
+            x, &\text{if $x < b$,}\\
+            r^{rec}_b(n+x'), &\text{if $x = nb+x'$, for $x'<b, n\geq1$.}
+        \end{cases}
+    \end{equation}
+We define the \emph{recursive quotient of $x$ modulo $b$} as
+    \begin{equation}
+        q^{rec}_b(x) = 
+        \begin{cases}
+            0, &\text{if $x<b$,}\\
+            n+q^{rec}_b(n+x'), &\text{if $x = nb+x'$, for $x'<b, n\geq1$.}
+        \end{cases}
+    \end{equation}
+\end{definition}
+
+%Note that $b>0$ and $x>0$ imply $r^{rec}_b(x)\geq1$. 
+We observe that $r^{rec}_b(x) = 0$ if and only if $x=0$, for any integer $b$. Let us apply Definition~\ref{def:recursive_modulo} to the previous example. 
+We have $b=3$ and $x = 8$, where $x$ denotes the cardinality of the entity $e$. We have $r^{rec}_b(x) = r^{rec}_3(8) = 2$ and $q^{rec}_b(x) = q^{rec}_3(8) = 3$. 
+To find all matches in $e$ we needed exactly three batches completely full of records in $e$ and one batch with exactly two records in $e$. So, before finding all matches in $e$, we first reduced it to a set of only 2 records. We want to formalize this concept.
+
+Let $\mathcal{E}$ denote the set of entities in $R$, i.e., the set of distinct real-world entities in $R$. By our notation $\mathcal{E}=R/\sim$. Additionally, for an entity $e\in\mathcal{E}$ let $|e|$ indicate its cardinality, i.e., $|e| = |\{r\in R \,|\, r\sim e\}|$. We can now formally define the \emph{representatives} of an entity.
+
+
+\begin{definition}\label{def:reduction}
+    Let $R$ be a set of records, $e$ an entity in $\mathcal{E}$, and $Q$ a sequence of queries. We say that \emph{$e$ is reduced to $\ell$ representatives by $Q$} if there exist $e_1, e_2,\ldots, e_\ell$ records in $R$ such that, for every $r\sim e$, there is a unique $1\leq i\leq \ell$ satisfying $r \sim_Q e_i$.
+\end{definition}
+
+The records $e_1, e_2,\ldots, e_\ell$ are called \emph{representatives of $e$}. We generalize the previous example in the following lemma.
+
+\begin{lemma}\label{lemma:representatives}
+    Let $R$ be a set of records, $e$ an entity in $\mathcal{E}$, and $b$ an integer. 
+    To reduce $e$ to $r^{rec}_b(|e|)$ representatives, at least $q^{rec}_b(|e|)$ $b$-batches are required. 
+    Moreover, if exactly $q^{rec}_b(|e|)$ $b$-batches are used, then each of these batches consists exclusively of representatives of $e$.
+\end{lemma}
+\begin{proof}
+We proceed by induction on $|e|$, the size of $e$. If $|e|< b$, then $q^{rec}_b(|e|) = 0$ and $r^{rec}_b(|e|) = |e|$, so the statement holds by taking each record in $e$ as its own representative.
+Assume the statement is true for all  $|e|\leq N-1$, and let us prove it for $|e| = N$.
+
+Let $[e]_\sim=\{r_1, r_2,\ldots, r_N\}$, and let $e'$ be a dummy entity satisfying $[e']_\sim = \{r_1, r_2,\ldots, r_{N-1}\}$. By induction, $e'$ can be reduced to $r^{rec}_b(|e'|)$ representatives using $q^{rec}_b(|e'|)$ $b$-batches. Now there are two cases: either $r^{rec}_b(|e'|) < b-1$, or $r^{rec}_b(|e'|) = b-1$. In the first case, it holds that $r^{rec}_b(|e|) = r^{rec}_b(|e'|) +1$. Thus, no additional $b$-batches are required: it suffices to keep the same representatives of $e'$ and consider $r_N$ as its own representative. Being $q^{rec}_b(|e|) = q^{rec}_b(|e'|)$, the claim is true in this case.
+
+In the second case, we have $r^{rec}_b(|e|) = 1$, and a $b$-batch containing $r_N$ together with all representatives of $e'$ is required. After this batch, $e$ is reduced to a single representative. Since $q^{rec}_b(|e|) = q^{rec}_b(|e'|) + 1$, the claim holds.
+\end{proof}
+
+
+\begin{comment}
+    \blue{TUTTA QUESTA PARTE BLU PUO' ESSERE ELIMINATA
+Let us introduce a crucial example, showing that sometimes it is convenient creating batches with records from different entities. We point out that a similar variant of the bin packing problem, called \emph{bin packing with item fragmentation}, is presented in \cite{menakerman2001bin}, where a bin can be split and each split bin is augmented by one. To the best of our knowledge, our problem has not been studied.}
+
+\begin{example}\label{ex:5_6_7}
+\blue{Let $e_x, e_y, e_z$ three entities composed by 5,6 and 7 records, respectively. To find all matches in these entities, we need to reduce each one to one representative. Assume that $b = 10$. Then we cannot put all the representatives of any two entities into the same $b$-batch. We can use Problem~\ref{prob:bin} for finding a solution, and, in this case, we obtain 3 $b$-batches (bins) as solutions. However, we can obtain the reduction to one representative for each entity by using only 2 $b$-batches. For instance, we create the first $b$-batch with all the representatives of $e_x$ and 5 representatives of $e_y$. After this, $e_x$ is reduced to one representative and $e_y$ to 2. Thus we can insert these last two representatives of $e_y$ with all the 7 representatives of $e_z$ in the second $b$-batch.
+    Another example. If $e_x, e_y, e_z$ had been reduced to $6,7,7$ representatives, respectively, then the minimum number of $b$-batches would have been solved by Problem~\ref{prob:bin}.}
+\end{example}
+\end{comment}
+
+
+
+\begin{theorem}\label{th:query_min}
+    Given a set of records $R$ and an integer $b$, let $\Phi_{b}$ be the minimum number of $b$-batches required to discover all matches in $R$. Then 
+    \begin{equation}\label{eq:phi_b}
+    \Omega + \frac{1}{b}\sum_{e\in\mathcal{E}_1} r^{rec}_b(|e|)\leq \Phi_b\leq \Omega + BPP(\mathcal{E}_1)
+    \end{equation}
+    
+    where $\Omega = \sum_{e\in\mathcal{E}} q^{rec}_b(|e|)$, $\mathcal{E}_1 =\{e\in\mathcal{E} \, | \, r^{rec}_b(|e|)>1\}$, and $ BPP(\mathcal{E}_1)$ is the solution of Problem~\ref{prob:bin} for $\mathcal{E}_1$, in which the capacity is $b$, the items are the entities in $\mathcal{E}_1$, and the size of each entity $e$ is $r^{rec}_b(|e|)$.
+\end{theorem}
+\begin{proof}
+    In order to find all the match edges, we need to reduce all the entities to a single representative. 
+    By Lemma~\ref{lemma:representatives}, at least $\Omega$ $b$-batches are required to reduce an entity $e$ to $r^{rec}_b(|e|)$ representatives. 
+    Then at least $\frac{1}{b}\sum_{e\in\mathcal{E}_1}r^{rec}_b(|e|)$ $b$-batches are needed to reduce all the recursive rests to a single representative; this prove the first part of the inequality. 
+    For the second part, we observe that in $BPP(\mathcal{E}_1)$ queries we can reduce each entity $e$ in $\mathcal{E}_1$ to a single representative by placing its $r^{rec}_b(|e|)$ representative into the same $b$-batch.
+\end{proof}
+
+%We observe that the lower bound in Equation~\ref{eq:phi_b} can be computed in $O(|R|)$ time, while the upper bound requires solving an instance of Problem~\ref{prob:bin}, which is NP-hard. Nevertheless, our experiments on real datasets (see Subsection~\ref{sub:???}) show that the lower bound differs from the upper bound by less than 3\%. 
+
+
+\subsection{Progressive Batched ER is NP-hard}\label{sub:PBER_NP-hard}
+
+From now on, let $\mathcal{E} = (e_1, e_2,\ldots)$ denote the sequence of entities ordered by cardinality, i.e., $|e_1|\geq |e_2| \geq\ldots$. 
+Given a sequence of batches $Q = (q_1,q_2,\ldots,q_T)$ and a batch $q$, let $Q\circ q$ denote the sequence $(q_1,q_2,\ldots,q_T, q)$, i.e., $Q$ extended by $q$. 
+Moreover, let $\Delta_q^Q$ denote the number of match edges discovered by querying the \oracle with $q$, assuming the queries in $Q$ have already been asked, formally, $\Delta_q^Q = \match_{Q\circ q} - \match_Q$. 
+By definition of $|\cdot|$, it holds
+\begin{equation}\label{eq:Delta_q}
+    \Delta^Q_q  = \sum_{(r,r')\in \binom{q}{2}} \mathbf{1}_{\{r\sim r'\}}|r|_Q\cdot |r'|_Q.
+\end{equation}
+
+%Note that, if all $\binom{b}{2}$ pairs of records in $q$ are matching pairs, then $\Delta_q^Q = \sum_{(r,r')\in \binom{q}{2}} |r|_Q\cdot |r'|_Q$. %This observation leads to the following definition that is used in Lemma~\ref{lemma:gain} to determine the gain of match edges, given priority to larger entities.
+
+\begin{definition}\label{def:gain}
+    Let $R$ be a set of records, $Q$ a sequence of batches, and $b$ an integer. For two distinct elements $r,r'$ in $R/\sim_Q$ we define
+\begin{equation}\label{eq:gain}
+    \gain^b_Q(r,r') =
+    \begin{cases}
+        0, & \text{if } r\not\sim r',\\
+        %0, & \text{if } r\sim_Q r',\\
+        |r|_Q\cdot |r'|_Q \cdot (1+\frac{1}{i\cdot \binom{b}{2}\cdot|e_1|^2}), &\text{if $r,r'\in e_i$.}
+    \end{cases}
+\end{equation}
+Moreover, let $\textit{Gain}^b_Q$ denote the complete graph on $R/\sim_Q$ in which the edges' weights are given by $\gain^b_Q$.
+\end{definition}
+
+The importance of the coefficient $(1+\frac{1}{i\cdot \binom{b}{2}\cdot|e_1|^2})$ is necessary to prioritize larger entities without affecting the number of new match edges discovered with a $b$-batch, as formalized in the following lemma.
+
+\begin{lemma}\label{lemma:gain}
+Let $R$ be a set of records, $Q$ a sequence of batches, and $b$ an integer. Let $q$ be a $b$-batch in $R/\sim_Q$, then
+\begin{equation}\Delta^Q_q  < \sum_{(r,r')\in \binom{q}{2}} \gain^b_Q(r,r') < \Delta^Q_q  + 1
+\end{equation}
+\end{lemma}
+\begin{proof}
+    By Equation~\ref{eq:Delta_q} it suffices to prove that $\Delta^Q_q  < \binom{b}{2}\cdot|e_1|^2$. We have exactly $\binom{b}{2}$ pairs in $q$, and each pair can discover at most $\frac{|e_1|(|e_1|-1)}{2} < |e_1|^2$ match edges. The thesis follows.
+\end{proof}
+
+To proceed, we first introduce a classical graph problem, whose NP-hardness was established in \cite{Feige2001}.
+
+\begin{problem}\label{prob:k-heaviest}[Heaviest Subgraph Problem (HSP)]
+    Given an edge-weighted graph $G$ and an integer $k$, find a subset $S$ of $k$ vertices of $G$ such that the sum of the edges' weight in $G[S]$ is maximized. 
+\end{problem}
+
+Let us define $HSP(G,k)$ as a solution for Problem~\ref{prob:k-heaviest} for graph $G$ and integer $k$.  In the following proposition, we describe the solution of Problem~\ref{prob:PBER}.
+
+\begin{proposition}\label{prop:max_gain_with_HSP}
+    Let $R$ be a set of records, $Q$ a sequence of queries, and $b$ an integer. Let $q$ be a $b$-batch in $R/\sim_Q$ that is a solution of HSP for $\textit{Gain}^b_Q$. Then $\Delta^Q_q \geq \Delta^Q_{q'}$ for every $q'$ $b$-batch in $R/\sim_Q$.    
+\end{proposition}
+\begin{proof}
+    Let $H$ be the graph in $R/\sim_Q$ in which the weight of the edge between records $r, r'$ is $|r|_Q\cdot|r'|_Q$, for every $r,r'\in  R/\sim_Q$ satisfying $r\sim r'$, and 0 otherwise. By Equation~\ref{eq:Delta_q}, the maximum $\Delta^Q_{q}$ is obtained by a solution $q$ of HSP on $H$. By Lemma~\ref{lemma:gain}, $q$ is a solution of HSP for $\textit{Gain}^b_Q$ if and only if $q$ is a solution of HSP for $H$. The thesis follows.
+\end{proof}
+
+\begin{theorem}\label{th:progressive_is_NP_hard}
+    Problem~\ref{prob:PBER} is NP-hard.
+\end{theorem}
+\begin{proof}
+    The thesis follows from Proposition~\ref{prop:max_gain_with_HSP} and the NP-hardness of Problem~\ref{prob:k-heaviest}.
+\end{proof}
+
+\subsection{Optimal Solution in Some Special Cases}\label{sub:optimal_solution}
+
+In this subsection, we prove that in some special cases, the optimal solution exists and we can describe it. 
+
+
+\begin{theorem}\label{th:optimal}
+    Let $R$ be a set of records, and $b$ an integer. Let $Q=(q_1,q_2,\ldots)$ be a succession of $b$-batches defined as
+    \begin{equation}
+        q_t = 
+        \begin{cases}
+            HSP(G_{\gain^b_{\emptyset}},b) & \text{if $t=1$,}\\
+            HSP(G_{\gain^b_{Q_{t-1}}},b) & \text{if $t> 1$}.
+        \end{cases}
+    \end{equation}
+
+If $r^{rec}_b(|e|) = 1$ for each entity $e$ in $R$, then $Q$ is a $b$-optimal.     
+\end{theorem}
+\begin{proof}
+    %In order to find all match edges related to an entity $e$, we need to reduce entity $e$ to one representative. 
+    Let $e$ be an entity in $R$ such that $|e| > 1$. Since by hypothesis $r^{rec}_b(|e|) = 1$, then, by Lemma~\ref{lemma:representatives}, entity $e$ can be reduced to a single representative in $q^{rec}_b(|e|)$ $b$-batches composed exclusively by representatives of $e$. 
+
+    In~\cite{firmani2016online} it is shown that, when $b=2$, the optimal solution is the one that reduces to one representative all the entities in non-increasing order of size. By above, this statement still holds when $b>2$ and $r^{rec}_b(|e|) = 1$.
+    
+    We observe that $Q$ visits all the entities in non-increasing order of size because of the coefficient $(1+\frac{1}{i\cdot \binom{b}{2}\cdot|e_1|^2})$ in Equation~\ref{eq:gain}. Moreover, among all the successions of $b$-batches that reduce to a single representative all the entities in non-increasing order of size, $Q$ is the one that finds as many match edges as possible for each $b$-batch because of Proposition~\ref{prop:max_gain_with_HSP}.
+\end{proof}
+
+We observe that when $b=2$, $r^{rec}_b(|e|) = 1$ for every entity $e$, so an optimal solution for pairwise batches always exists by Theorem~\ref{th:optimal}. In addition, the optimal solution described in Theorem~\ref{th:optimal} coincides with the one described in~\cite{firmani2016online}.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.95\textwidth]{figures/schema.pdf}
+  \caption{Schematic representation of the \texttt{pERbacco} algorithm, highlighting its core components.}
+  \label{fig:schema_perbacco}
+\end{figure*}
+
+
+\section{Proposed approach: pERbacco}\label{sec:perbacco}
+
+In this section, we present our approach for \underline{p}rogressive \underline{E}ntity \underline{R}esolution via \underline{ba}t\underline{c}hed queries and \underline{co}mmunity detection (called \emph{pERbacco}). 
+It consists in 3 steps: computing a similarity graph $G$ on $R$, partitioning $G$ by recursively calling a Community Detection Algorithm (CDA), deciding whether it is more convenient to try to enlarge already visited entities, or visiting new records belonging to the same community. The first two steps are static, meaning that they can be computed before starting to query the \oracle. The third step is dynamic and depends on the answers we obtain from the \oracle. A schematic overview of \perbacco is shown in Figure~\ref{fig:schema_perbacco}.
+
+
+
+
+Let us briefly analyze these steps one by one. There are several methods in the literature to compute a similarity graph $G$; we refer to Subsection~\ref{sub:similarity_graph} for further details. We emphasize that our approach does not rely on any specific method.
+
+
+
+
+In the second step, we partition the similarity graph $G$ into \emph{heavy communities}. All records that do not belong to any heavy community form the \emph{residual graph}. A heavy community is a subgraph of $G$ whose density is greater than a fixed threshold (see Subsection~\ref{sub:graph_partitioning}). Since the weights of match edges in $G$ are expected to be higher than those of non-match edges, a heavy community should mainly consist of match edges. We define the \emph{intra-recall} as the ratio between the number of match edges in $G$ and the number of match edges that belong to at least one heavy community. The desiderata for heavy communities are:
+\begin{itemize}
+\item a high number of match edges within each heavy community,
+\item a low number of match edges between different heavy communities,
+\item an intra-recall close to the overall recall of $G$,
+\item community sizes roughly comparable to $\window$.
+\end{itemize}
+
+By following the structure induced by these heavy communities, the discovery of match edges should be accelerated. The algorithm for this second step is explained in Subsection~\ref{sub:graph_partitioning}, and experiments are in Subsection~\ref{sub:communities_experiments}.
+
+In the last step, we decide whether it is more convenient to try to enlarge already visited entities or visit new records belonging to the same community. The main idea is that visiting new records should discover less match edges (see Table~\ref{tab:batch_comparison} and Subsection~\ref{subsub:current_community_batches}). So, if by trying to enlarge already visited entities we discover a few edges, then in the next query we visit new records of the current community. The decisions are driven by an evolving parameter called \emph{temperature}, see Subsection~\ref{subsub:temperature}. This temperature is linked to the concept of  \emph{benefit}, where the benefit, introduced in~\cite{firmani2016online} and formally defined in Subsection~\ref{subsub:benefit}, is a measure of the expected gain in match edges -- and thus, gain in recall.  Note that this last step is repeated for each query.
+
+
+
+
+\subsection{Similarity Graph}\label{sub:similarity_graph}
+
+A similarity graph is a weighted graph where the set of vertices corresponds to the set $R$ of records, and the weight of an edge between two records quantifies their \emph{similarity}: the higher the weight, the higher the probability that the two records match.
+
+%There is a wide literature about methods for computing similiraty graphs... \blue{continuare il bla bla bla}
+
+The construction of similarity graphs has been extensively studied in the context of entity resolution and data integration.
+Classical approaches compute pairwise similarities by combining attribute-level similarity functions, such as string edit distances, token-based measures (e.g., Jaccard or TF–IDF), and numeric distance functions, often using manually defined rules or weighted combinations~\cite{DBLP:books/daglib/0030287, DBLP:journals/pvldb/PaulsenGD23}.
+More advanced methods adopt probabilistic and learning-based models, where similarity functions or matching scores are learned from data \cite{li2020deep, peeters2023using, wang2023sudowoodo}.
+%While these approaches can improve matching accuracy, they typically introduce additional computational complexity and, in some cases, require training data.
+
+Independent of the specific similarity model, ER systems must address the quadratic complexity of pairwise comparisons.
+For this reason, similarity computation is almost always coupled with blocking and indexing techniques, whose goal is to restrict similarity evaluation to promising candidate pairs.
+A large body of work investigates blocking methods, which are commonly integrated into both traditional and learning-based ER pipelines \cite{DBLP:journals/tkde/Christen12, papadakis2016scaling, DBLP:journals/is/GagliardelliPSBP24, thirumuruganathan2021deep, javdani2019deepblock}.
+
+In this work, we assume that a similarity graph $G$ on $R$ is given, and let $w : E(G) \to [0,1]$ the weight function on edges; without loss of generality, we assume that the maximum weight is 1.
+Our approach is independent of the specific technique used to compute similarities, and can operate with any method that assigns edge weights reflecting the likelihood of records matching.
+
+%From now on, we assume that we have a similarity graph $G$ on $R$, and let $w : E(G) \to [0,1]$ the weight function on edges; without loss of generality, we assume that the maximum weight is 1.
+
+
+\subsection{Graph Partitioning}\label{sub:graph_partitioning}
+
+We need to balance the weight and the size of the communities. Indeed, splitting a community into two or more subcommunities may increase the average weight, but we might lose some edges that match. We find communities via a Community Detection Algorithm (\emph{CDA}), and we say that a community is \emph{indivisible for CDA} if the CDA cannot divide it into more subcommunities. Finally we define $\textit{min\_size} = \max(\window,10)$, and we will not consider \emph{small} communities, i.e., communities with less than $\textit{min\_size}$ records.% (and thus it doesn't make sense to further divide it). %If a community is not divisible, then we call it \emph{divisible}. 
+
+\begin{figure}[h]
+  \centering
+  \vspace{-5pt}
+  \includegraphics[width=0.75\columnwidth]{figures/community.pdf}
+  \caption{A similarity graph with match (solid green) and non-match (dotted orange) edges. Heavy and light communities are marked with solid blue and dotted gray, respectively.}
+  \label{fig:community}
+  \vspace{-10pt}
+\end{figure}
+
+In Figure~\ref{fig:community}, there is a  similarity graph $G$, where edge thickness denotes weights. A heavy community is highlighted in blue, and a light (i.e., not heavy) one in gray. Recursively, light communities are sent to the CDA to further split them until they become either heavy or indivisible. The records that do not belong to any heavy community form the residual graph. Note that in Figure~\ref{fig:community} the only one heavy community contains a relevant part of the match edges.
+
+
+After the computation of the heavy communities, we order them by their weights (see Equation~\ref{eq:weight}). We denote this order by $\mathcal{C} = (c_1, c_2, \ldots, c_r)$. We will analyze the communities by following this order; the pseudocode is shown in Algorithm~\ref{alg:community}. In the whole paper and in all presented algorithms, ties are broken randomly.  An empirical analysis on the CDAs, the heaviness threshold $\lambda_w$, and how to obtain the desiderata described at the beginning of this section are in Subsection~\ref{sub:communities_experiments}.
+
+
+
+
+
+%{\color{blue}We expect to have more match edges in the first communities, and few match edges intra-community. The last two concepts can be resumed as: if $i >> j$, then we expect that $\recall(c_i) > \recall(c_j)$, and if $i\neq j$, then $\recall(c_i\cup c_j) \approx  \recall(c_i) + \recall(c_j)$.} 
+
+We define the \emph{weight} of a community $c$ as
+\begin{equation}\label{eq:weight}
+     w(c) = \sum_{e\in c} w(e),
+\end{equation}
+The main idea is that the higher $w(c)$, the higher the number of expected match edges. Moreover we define the \emph{density} $\rho(c)$ of a community $c$ as the classical edge-weighted density:
+
+\begin{equation}\label{eq:omega}
+     \rho(c) = \frac{w(c)}{|c|(|c|-1)/2}.
+\end{equation}
+
+%\red{l'ultima community NON può essere i restanti, sennò non funziona \perbacco}
+
+
+\begin{algorithm}[h]
+\caption{Communities $(G, \lambda_w, CDA)$}\label{alg:community}
+\KwIn{a graph $G$, a threshold $\lambda_w$, and a community detection algorithm $CDA$}
+\KwOut{a queue of heavy communities of $G$}
+{$\textit{light\_communities} = [V(G)]$\;
+$\textit{heavy\_communities} = []$\;
+%$atoms = []$\;
+\While{$\textit{light\_communities}\neq []$}{
+    $c = pop(\textit{light\_communities})$\;
+    $\textit{sub\_communities} = CDA(c)$\;
+    \For{each $c'\in \textit{sub\_communities}$}{
+            \If{$\rho(c') \geq \lambda_{w}$}{
+                add $c'$ to $\textit{heavy\_communities}$\;
+            }
+            \If{$\rho(c') < \lambda_{w}$ and $c'$ is not indivisible for CDA}{
+                add $c'$ to $\textit{light\_communities}$\;
+            }
+        }
+}	
+Discard from $\textit{heavy\_communities}$ all the communities having less than $\textit{min\_size}$ records\;
+Sort the communities in $\textit{heavy\_communities}$ w.r.t. $w$\;
+\Return{$\textit{heavy\_communities}$}
+}
+\end{algorithm}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{comment}
+\subsection{Community-batches}
+# OLD VERSION con i community-batch calcolati prima
+We need to group all the records in community-batches of dimension $\window$. Clearly, the order of the community-batches will follow the order $\mathcal{C}$ of the communities. This means that, by denoting with $\mathcal{B} = (b_1, b_2, \ldots, b_s)$ the order of the community-batches, if two records $r,r'$ are contained in the communities $c_i,c_j$ and in the batches $b_k,b_\ell$, respectively, then $i<j$ implies $k<\ell$. 
+
+Let us assume that $|c_i| = s_i\cdot\window + r_i$, with $r_i < \window$. Then we split records in $c_i$ in $s_i$ community-batches and we consider each remaining record as representative of itself.
+
+We remind that we can insert in a current-batch records of different communities, and so also records of the same community that were split in different community-batches. Since we are trying to maximize the progressive recall, we need to choose the community-batches of a community properly. Let $c$ be a community and let $\mathcal{B}^c = (b_1^c, b_2^c, \ldots, b^c_s)$ be the partition of records in $c$ in community-batches (for the moment its not relevant if the last community-batch contains also records of the next community). We want to maximize
+\begin{equation}\label{eq:sum_recall}
+    \sum_{b\in\mathcal{B}^c} recall(b).
+\end{equation}
+If the community is composed by only one entity, then Equation~\ref{eq:sum_recall} is maximized by choosing the community-batches in $\mathcal{B}^c$ in any way. {\color{blue} per intenderci: se ci sono 2 entità, allora raggruppo in base alle 2 entità} Since we don't know how many entities are present in the community, we need a strategy based on the weights. We want to maximize
+\begin{equation}\label{eq:sum_weight}
+    \sum_{b\in\mathcal{B}^c} w(b),
+\end{equation}
+
+where, for every set of records $X$, we define $w(X)=\sum_{x\in X}w(x)$. The idea is that maximizing the sum of the weights, in some way, reflects maximizing the sum of the recall. Maximizing Equation~\ref{eq:sum_weight} is equivalent to solve an instance of HSP, that, as previously stated, is a NP-hard problem~\cite{Feige2001}. 
+\end{comment}
+
+\subsection{Creating Batches}
+
+In this subsection we enter the core of our approach. In Subsection~\ref{subsub:benefit} we introduce the \emph{benefit}, which is based on the concept ``higher the benefit among two records, the higher the expected number of discovered match edges when queried''. In Subsection~\ref{subsub:greedy} we describe a greedy algorithm for HSP that is necessary for maximizing the sum of benefits. In Subsection~\ref{subsub:current_community_batches} we define our two different kinds of batches (\emph{current-batches} and \emph{community-batches}), and, finally, in Subsection~\ref{subsub:temperature} we detail how to set the \emph{temperature}, that is the parameter that drives the choice between current-batches and community-batches.
+
+\subsubsection{Benefit}\label{subsub:benefit}
+
+As we query the \oracle, the number of records that are representative of more than one increases. So it may be helpful for the progressive recall to create batches composed by the representatives that are likely to match. We need a measure that expresses this.
+
+Given a sequence of queries $Q$ and a pair of records $r$ and $r'$, we define the $\emph{benefit}_Q(r,r')$ as the potential gain in matches obtained by asking the \oracle whether $r$ and $r'$ match, as done in~\cite{firmani2016online}. We want $\benefit_Q(r,r')$ to be proportional to $|r|\cdot|r'|$, which corresponds to the number of match edges that would be discovered if $r$ matches $r'$. Moreover, $\benefit_Q(r,r')$ should be proportional to the probability that $r$ and $r'$ match. We simulate these probabilities by introducing a \emph{matching coefficient for $r$ and $r'$}, meaning that the higher the value of $\mu_Q(r,r')$, the higher the probability that $r$ and $r'$ match. Some proposals of $\mu_Q(r,r')$ are shown in the next Subsection~\ref{subsub:matching_coefficient} and they are validated through experiments.
+
+The formula for $\benefit_Q(r,r')$ follows:
+
+\begin{equation}\label{eq:benefit}
+    \benefit_Q(r,r') =
+    \begin{cases}
+        0, & \text{if } r\not\sim_Q r',\\
+        \mu_Q(r,r') \cdot |r|_Q\cdot |r'|_Q, &\text{otherwise.}
+    \end{cases}
+\end{equation}
+
+If $Q$ is clear from the context, then we omit it. Note that the term $|r|\cdot|r'|$ in Equation~\ref{eq:benefit} corresponds to the number of match edges discovered if $r$ matches $r'$. %So the benefit balances the crossing benefit with the cardinality of the two entities represented by $r$ and $r'$.
+
+\paragraph{Matching coefficient}\label{subsub:matching_coefficient}
+
+%As just stated, in order to define the benefit between two records $r$ and $r'$, we introduced the \emph{matching coefficient} $\mu_Q(r,r')$ between $r$ and $r'$.
+Given two records $r$ and $r'$, there is no unique way to define $\mu_Q(r,r')$, but it must satisfy the property that the higher $\mu_Q(r,r')$, the higher the probability that $r$ and $r'$ match. In this sense, the matching coefficient between $r$ and $r'$ \emph{simulates} the probability of a match between $r$ and $r'$.
+
+We define $\textit{Cross}_Q(r,r') =\{(u,v)\in E(G) \ | \ u\in [r]_{\sim_Q}$ and $v\in [r']_{\sim_Q}\}$. Basically, $\textit{Cross}_Q(r,r')$ is composed by all edges in $G$ having one endpoint in $[r]_{\sim_Q}$ and the other in $[r']_{\sim_Q}$, i.e., the edges that \emph{cross} $[r]_{\sim_Q}$ and $[r']_{\sim_Q}$. In~\cite{firmani2016online} (see Equation (2) with our notation), $\mu_Q(r,r')$ is defined as the maximum edge weight in $\textit{Cross}_Q(r,r')$, that is
+\begin{equation}\label{eq:crossing_DD}
+     \mu_Q^{\max}(r,r') = \max_{e\in \textit{Cross}_Q(r,r')}w(e).
+\end{equation}
+We believe that the maximum is not really representative of the probability that $r$ and $r'$ match. 
+%Indeed, we may have the case in which all edges in $\textit{Cross}_Q(r,r')$ but one have very low weight, and one has high weight. In this case, $\mu_Q^{\max}(r,r')$ suggests that $r$ and $r'$ have a high probability to match, while a high number of edges with low weight in $\textit{Cross}_Q(r,r')$ indicates the opposite. 
+So we introduce a \emph{mean} version:
+\begin{equation}\label{eq:crossing_density}
+     \mu_Q^{\text{mean}}(r,r') = \frac{\sum_{e\in \textit{Cross}_Q(r,r')}w(e)}{|r|_Q\cdot|r'|_Q}.
+\end{equation}
+
+%After a sequence of queries $Q$, we denote by $[r]_Q$ (or, simply, $[r]$) the set of records that matches $r$ after the queries in $Q$, and by $|r|$ the cardinality of $[r]$. Given two representative records $r$ and $r'$, . We also define the \emph{crossing density between $r$ and $r'$} as
+
+
+Let us briefly explain Equation~\ref{eq:crossing_density}. Note that $\mu_Q^{\text{mean}}(r,r')\in[0,1]$, since there are at most $|r|_Q\cdot|r'|_Q$ edges in $\textit{Cross}_Q(r,r')$. Moreover,  a value of  $\mu_Q^{\text{mean}}(r,r')$ close to 1 indicates that there $\textit{Cross}_Q(r,r')$ contains many edges with high weights. Conversely, a value close to 0 means that either there are few edges, their weights are low, or both. Thus, the closer $\mu_Q^{\text{mean}}(r,r')$ is to 1, the higher the probability that $r$ and $r'$ match. In Section~\ref{sec:experiments} we show that the presented algorithms perform better using $\mu_Q^{\text{mean}}$ than $\mu_Q^{\text{max}}$ in Equation~\ref{eq:benefit}.
+
+
+
+\subsubsection{A greedy algorithm for the Heaviest Subgraph Problem}\label{subsub:greedy}
+
+
+As we will explain in Subsection~\ref{subsub:current_community_batches}, at each step of our algorithm we need to select a subset of $\window$ records that maximizes the sum of benefit edges. This corresponds to solving an instance of Problem~\ref{prob:k-heaviest}, which, as previously stated, is NP-hard. Therefore, we use a greedy approach for Problem~\ref{prob:k-heaviest}. 
+If $b=2$, we simply select the two vertices of the edge with the maximum weight in $G$, which is the optimal solution. Otherwise, we start with $S=\{v\}$, where $v$ is the vertex whose incident edges have the maximum total weight. Formally, we define $w_e(x) =\sum_{e\in E(G), x\in e}w(e)$, thus $v = \argmax_{x\in V(G)} w_e(x)$. 
+Then, until $|S| = b$, we iteratively either add the vertex that maximizes the sum of the edge weights, or add the two vertices of the edge with maximum weight in the graph $G\setminus G[S]$. The pseudocode is reported in Algorithm~\ref{alg:greedy}.
+
+
+\begin{algorithm}[h]
+\caption{\textit{GreedyHS}$(G, b)$}\label{alg:greedy}
+\KwIn{an edge-weighted graph $G$ and an integer $b$}
+\KwOut{a suboptimal solution to Problem~\ref{prob:k-heaviest}}
+{
+\If{$b = 2$}{\label{line:b=2}
+    let $e = (u,v)$ be the edge with the maximum weight\;
+    \Return{$\{u,v\}$}
+}
+$u = \argmax_{x\in V(G)}\ w_e(x)$\;  
+$v = \argmax_{y \textit{ neighbors of } u}\ w((y,v))$\;
+$S = \{u,v\}$\;
+\While{$|S|< b$ and $|S|<|V(G)|$}{
+    let $(x,y)$ be the heaviest edge in $G\setminus G[S]$\;
+    let $z$ be the vertex in $G$ that maximizes $W = w(G[S \cup \{z\}])$\;
+    \uIf{$w(G[S]) + w((x,y)) > W$ and $|S|\leq b - 2 $}{
+        add $x$ and $y$ to $S$\;
+    }
+    \Else{
+        add $z$ to $S$\;
+    }
+}
+\Return{$S$}
+}
+\end{algorithm}
+
+
+
+
+
+\subsubsection{Current-batches and community-batches}\label{subsub:current_community_batches}
+
+We now have all the necessary definitions to describe our approach in detail. As mentioned at the beginning of this section, at each step we decide whether it is more convenient to try to enlarge already visited entities or to explore new records within the same community. This decision is guided by introducing two subsets of the records: \emph{current} and \emph{unqueried}.
+
+At each step, only a subset of the records, called \emph{current}, is considered. The subset \emph{current} follows the sequence of heavy communities $c_1, c_2,\ldots$: at the first query \emph{current} is equal to $c_1$; once all records in $c_1$ have been queried at least once to the \oracle, \emph{current} is equal to $c_1\cup c_2$; once all records in $c_2$ have been queried, then \emph{current} is equal to $c_1\cup c_2\cup c_3$; and so on.
+
+The set \emph{unqueried} corresponds, at each step of the algorithm, to the subset of records in \emph{current} that have not yet been queried to the \oracle. We now define two specific \emph{benefit} graphs.
+
+\begin{definition}\label{def:g_benefit}
+    Given a sequence of queries $Q$ and a set of records $V$, we define the \emph{benefit graph on $V$}, $B_{V}(Q)$, as the graph on $V/\sim_Q$ in which edge weights represent the benefit among records. Moreover, given a temperature $t$, we define $B_{V}^t(Q)$ as the subgraph of $B_{V}(Q)$ induced by all edges whose weight is higher than $t$.
+\end{definition}
+
+
+In Definition~\ref{def:g_benefit}, if $Q$ is clear from the context, we omit it. At each step, we aim to maximize the sum of benefits by considering either all records in \emph{current} or only the subset \emph{unqueried}. Considering \emph{current} corresponds to try to enlarge already visited entities, which is done by $\textit{GreedyHS}(B^t_{\textit{current}},\window)$, where the parameter $t$ is fixed in the next subsection. Considering \emph{unqueried} corresponds to visiting new records within the same community, which is done by $\textit{GreedyHS}(B_{\textit{unqueried}},\window)$.
+
+For convenience, we refer to a batch composed of records in \emph{current} as a \emph{current-batch}, and a batch composed of records in \emph{unqueried} as a \emph{community-batch}. In the next subsection, we explain how to set the temperature $t$, which determines whether it is more advantageous to proceed with a \emph{current-batch} or a \emph{community-batch}.
+
+A summary of the differences between \emph{current-batches} and \emph{community}\emph{-batches} is reported in Table~\ref{tab:batch_comparison}. 
+In particular, \emph{current-batches} are not disjoint, meaning that the same record may appear in multiple current-batches; records may belong to different communities; the number of discovered match edges is unbounded, as it depends solely on the (a priori unknown) ground truth of the dataset; and records may have already been queried.
+In contrast, \emph{community-batches} are disjoint; all records belong to the same community; there exists an upper bound on the number of possible discovered match edges; and all records are unqueried.
+
+
+
+\begin{table}[h]
+    \small 
+    \setlength{\tabcolsep}{3pt} 
+    \centering
+    \renewcommand{\arraystretch}{1.5}
+    \begin{tabular}{|c|c|c|c|c|}
+        \hline
+        Type & Disjoint & Communities & \# Matches  & Queried/Unqueried\\ 
+        \hline
+        Current & No & Any & Unlimited & Both\\ 
+        \hline
+        Community & Yes & Same & $\leq \frac{\window(\window-1)}{2}$ & Unqueried\\ 
+        \hline
+    \end{tabular}
+    \caption{Comparison between current-batches and community-batches.}
+    \label{tab:batch_comparison}
+\end{table}
+
+
+
+
+\subsubsection{Setting the temperature}\label{subsub:temperature}
+
+We now describe how to set the parameter $t$, which depends on the evolution of the benefit values. However, the benefit's value depends on the input dataset we are examining. 
+For instance, if the input dataset has many entities with a huge number of duplicated records, then it is possible to have high benefit values; conversely, if each entity of the input dataset has at most a few duplicates, then it is impossible to have high benefit values. In a nutshell, there is no single value of $t$ that works for all input datasets. 
+Therefore, we introduce two criteria to determine when the value of $t$ is too high and whe it is too low.
+
+Since we consider only two kinds of batches -- current-batches and community-batches -- the only alternative to querying the \oracle with a current-batch is to query it with a community-batch. 
+Thus, the criterion to determine when the value of $t$ is too low consists in checking whether the match edges discovered through a current batch are greater than the average number of match edges discovered through previous community batches. 
+In formalize this criterion, we introduce the following notation. Let $M^I_{comm}$ be the number of match edges discovered after querying the \oracle with the first $I$ community-batches, and let $\tau^I_{comm} = M^I_{comm}/I$ be the average of match edges discovered. If no confusion arises, then we omit the index $I$. 
+Let $M$ be the number of match edges discovered after querying the \oracle with a current batch. The criterion is: if $M < \tau_{comm}$, then $t$ is too low; therefore we double it (see Algorithm~\ref{alg:main} line~\ref{line:if_then_double}).
+
+The criterion for determining when the value of $t$ is too high consists in checking whether $G^t_{\textit{benefit}}$ contains more than $\window$ vertices. 
+If not, we decrease the value of $t$ by multiplying it by the factor $(1-\frac{1}{\window})$ (see Algorithm~\ref{alg:main} line~\ref{line:else_5_percent}). 
+This ensures that we query the \oracle with a current-batch approximately every $\window$ queries. 
+Through experiments, we observed that our algorithm's performance improves when the frequency of current-batches is inversely proportional to $\window$, which motivates the factor $(1-\frac{1}{\window})$.
+
+%This ensures that we avoid stopping querying the \oracle with current-batches in the case the values of benefit are low. Note that if the value of $t$ becomes too low, then it is doubled by the previous criterion. 
+
+By having the previous two criteria for high and low values of $t$, the choice of the initial value of $t$ is not relevant.
+By default, we choose $t = \window$ at the beginning of the algorithm. Our main algorithm \perbacco is reported in Algorithm~\ref{alg:main}, where $\query(S)$ means ``query the \oracle with the records in $S$''.
+
+\begin{algorithm}[h]
+\caption{\perbacco}\label{alg:main}
+\KwIn{a set of records $R$ and an integer $\window$}
+\KwOut{a sequence of $\window$-batches of $R$}
+{
+Compute a similarity graph $G$ on $R$\;
+Compute set $\mathcal{C}$ of heavy communities in $G$ by Algorithm~\ref{alg:community}\;
+$t= b$\;
+$\textit{current} = \emptyset$\;
+
+\For{$c \in\mathcal{C}$}{
+    $\textit{current} = \textit{current} \cup c$\;
+    $\textit{unqueried} = c$\;
+    \While{$|unqueried| \geq \window$}{
+        $\textit{community\_batch}= \textit{GreedyHS}(G[\textit{unqueried}],\window)$\;   
+        $\query(\textit{community\_batch})$\;
+        $\textit{unqueried} = \textit{unqueried} \setminus \textit{community\_batch}$\;
+        \While{$|V(B^t_{\textit{current}})| \geq\window$}{
+        $\textit{current\_batch} = \textit{GreedyHS}(B_{\textit{current}}^t,\window)$\;
+        $\query(\textit{current\_batch})$, and let $M$ be the number of match edges discovered\;
+        $unqueried = unqueried \setminus \textit{current\_batch}$\;
+        \If{$M < \tau_{comm}$}{\label{line:if_then_double}
+            $t= 2t$\;
+                }   
+        }
+        $t = \big(1-\frac{1}{\window}\big)\cdot t$\label{line:else_5_percent}\;
+    }
+}
+$\textit{current} = V(G)$\;
+\While{there are non-inferable edges}{
+    $\textit{current\_batch} = \textit{GreedyHS}(B_{\textit{current}}^t,\window)$\;
+    $\query(\textit{current\_batch})$\;
+}
+}
+\end{algorithm}
+
+
+
+
+
+
+
+
+
+\section{Experimental Evaluation}\label{sec:experiments}
+
+In this section, we discuss the results of our experimental evaluation. We compare all algorithms on publicly available datasets and synthetic ones. The datasets used in our experiments are described in Subsection~\ref{sub:datasets}.
+To the best of our knowledge, there are no known algorithms for progressive entity resolution via adaptive batch query; so we extend the algorithms in~\cite{firmani2016onne} from the pairwise query case to the batch query case, see Subsection~\ref{sub:competing_algorithms}. 
+We omit several non-adaptive competitor algorithms, such as the ones in~\cite{DBLP:journals/csur/ChristophidesEP21,crowder,papadakis_exploration},  since their performance is strictly lower than that of competing algorithms described in Subsection~\ref{sub:competing_algorithms}. Indeed, adapting the queries to the \oracle based on previous answers provides a significant advantage in terms of progressive recall.
+All algorithms are implemented in Python, in a common framework\footnote{\url{https://github.com/Stravanni/pERbacco}}, where ties are broken randomly. We ran experiments on a machine with an AMD Ryzen 9 5950X CPU, 64 GB RAM, and an NVIDIA RTX 3090 GPU under Ubuntu 22.04.
+
+In our experimental evaluation, the similarity graph was constructed using \emph{standard-blocking} and \emph{meta-blocking} in the JedAI library~\cite{DBLP:journals/is/Mandilaras0GSTG21}.
+For each dataset, we tuned the meta-blocking parameters to achieve a recall above 0.9, ensuring that the majority of true match edges were preserved in the resulting graph.
+This choice reflects a concrete instantiation of the similarity graph abstraction introduced in Subsection \ref{sub:similarity_graph} and does not affect the generality of the proposed approach.
+
+\subsection{Competing Algorithms}\label{sub:competing_algorithms}
+
+Firmani et al.~\cite{firmani2016online} presented two algorithms for the progressive entity resolution with pairwise adaptive query. The two algorithms are called $s_{\text{edge}}$ and $s_{\text{hybrid}}$; we do not deeply explain these algorithms, and we refer to~\cite{firmani2016online} for further details. 
+In a nutshell, $s_{\text{edge}}$ queries the \oracle each time with the edge having the highest benefit, and $s_{\text{hybrid}}$ queries the \oracle with the edges adjacent to the vertex with the highest total benefit (i.e., the vertex whose sum of benefits of adjacent edge is maximized), until a match edge is discovered or a prefixed number of edges have been queried.
+We merge both algorithms in Algorithm~\ref{alg:DD}: when $\window = 2$, we obtain exactly $s_{\text{edge}}$ because of the case $b=2$ in Line~\ref{line:b=2} of Algorithm~\ref{alg:greedy}; when $\window > 2$, we adapt $s_{\text{hybrid}}$ to the batch-queries case by using the $\textit{GreedyHS}$ algorithm. 
+
+In our experiments, we denote by \perbac (resp., \DD) the results of Algorithm~\ref{alg:DD} when the benefits are computed using $\mu^{\max}$ (resp., $\mu^{\text{mean}}$). Note that \perbac coincides with \perbacco when there are no heavy communities. Moreover, in~\cite{firmani2016online} (titled \emph{Online Entity Resolution Using an Oracle}), the benefits are computed with $\mu^{\max}$. These observations motivate the naming of the algorithms.
+
+\begin{algorithm}[h]
+\caption{batched ER without communities}\label{alg:DD}
+\KwIn{a set of records $R$ and an integer $\window$}
+\KwOut{a sequence of $\window$-batches of $R$}
+{
+Compute a similarity graph $G$ on $R$\;
+%Consider all the records as visited\;
+\While{there are non-inferable edges}{
+    $\query(\textit{\textit{GreedyHS}}(B_{V(G)},\window))$\;}
+}
+\end{algorithm}
+
+
+
+\subsection{Datasets and Query Complexity}\label{sub:datasets}
+We evaluate our approach \perbacco and competing algorithms on both real and synthetic datasets. The following real datasets range from a variety of domains, such as product, business, and citation.
+
+\begin{comment}
+    \begin{itemize}
+    \item \cora: the \cora dataset consistlearning publications~\cite{firmani2016online}.%\blue{manca link download, quello sul paper~\cite{firmani2016online} è scaduto} % classified into one of seven classes.
+    \item \camera: the \camera dataset is composed of 29.8$k$ specifications collected from 24 e-commerce websites referring to real world cameras. The dataset is taken from the ACM SIGMOD 2020 programming contest~\cite{crescenzi2021alaska}.%\blue{manca link download}   %Each specification is a list of name-value pairs describing a camera that is being sold on the website.
+    \item \funding\footnote{https://raw.githubusercontent.com/qcri/data\_civilizer\_system/master/grecord\_
+service/gr/data/address/address.csv}: the \funding dataset contains 16.3$k$ records about financing requests addressed to the NYC Council Discretionary Funding.
+    \item \wdc\footnote{https://webdatacommons.org/largescaleproductcorpus/wdc-products/index.html\#toc5}: the Web Data Commons (WDC) Products dataset introduced in~\cite{peeters2023wdc} contains 11715 product offers describing 2162 unique real-world products. These product offers have been extracted from 3259 Web shops in 2020 using the schema.org annotations.
+    %\item cddb\footnote{https://hpi.de/naumann/projects/repeatability/datasets/cd-datasets.html}: the cddb dataset contains 9763 CDs randomly extracted from freeDB\footnote{http://www.freedb.org/}.
+    \item \voters\footnote{https://hpi.de/naumann/projects/repeatability/datasets/ncvoters-dataset.html}: \voters dataset contains demographic information about 14.2$k$ registered voters from North Carolina~\cite{voters_data}, which are grouped based on the sex and race attributes.
+    %\item restaurant\footnote{https://www.cs.utexas.edu/~ml/riddle/data.html}: a collection of 864 restaurant records from the Fodor's and Zagat's restaurant guides that contains 112 duplicates.
+    %\item \blue{census: NON HO TROVATO NULLA. Forse possiamo eliminare un dataset clean-clean}
+\end{itemize}
+\end{comment}
+
+
+We consider five real datasets in our experiments. The \cora dataset consists of 2,708 scientific machine-learning publications~\cite{firmani2016online}. \camera contains 29.8$k$ specifications of real-world cameras collected from 24 e-commerce websites, originally used in the ACM SIGMOD 2020 programming contest~\cite{crescenzi2021alaska}. \funding\footnote{https://raw.githubusercontent.com/qcri/data\_civilizer\_system/master/grecord\_
+service/gr/data/address/address.csv} includes 16.3$k$ records on financing requests submitted to the NYC Council Discretionary Funding. The Web Data Commons (\wdc) Products dataset~\cite{peeters2023wdc}\footnote{https://webdatacommons.org/largescaleproductcorpus/wdc-products/index.html\#toc5} contains 11,715 product offers describing 2,162 unique real-world products, extracted from 3,259 web shops in 2020 via schema.org annotations. Finally, the \voters\footnote{https://hpi.de/naumann/projects/repeatability/datasets/ncvoters-dataset.html} dataset contains demographic information on 14.2$k$ registered voters from North Carolina, grouped by sex and race~\cite{voters_data}. Table~\ref{tab:dataset_table} summarizes key statistics for each dataset.
+
+
+The synthetic datasets are randomly generated according to a specific distribution of weights and edges. The distribution of entity sizes follows the entity size distribution observed in the \camera dataset, which exhibits power-law behavior; to avoid excessively large entities, we a maximum size of 300. 
+We generate a dataset, \synth, consisting of approximately 39k records and exactly 10k entities. Thd at 0.95, while we create three variants with precision values of 0.5, 0.2, and 0.05, respectively. The missing match edges and the non-match edges are generated randomly.
+ 
+
+To model edge weights distribution, we analyzed the real datasets and their corresponding similarity graphs (see Subsection~\ref{sub:similarity_graph}). Across all datasets, the weights of non-match edges follow a power-law distribution. In contrast, the weight distributions of match edges vary substantially between datasets. For this reason, we generate the weights of match edges using a uniform distribution.
+
+\setlength{\tabcolsep}{3pt}
+{\small
+\begin{table}[!h]
+    \centering
+    \begin{tabular}{|c|c|c|c|c|c|c|}
+        \hline
+        \multirow{2}{*}{Dataset} & \multirow{2}{*}{Records} & \multirow{2}{*}{Matches} & \multirow{2}{*}{Entities} & \multicolumn{3}{c|}{Entity Sizes} \\
+        \cline{5-7}
+        & & & & Mean & Med. & Max \\
+        \hline
+        \cora & 1295 & 17184 & 93 (112) & 13.7 & 7  & 64\\
+        \camera & 29787  & 541411 & 2087 (9005) & 9.9  & 4  & 256   \\
+        \funding & 16258  & 135122 & 2351 (3113) & 6.5  & 4  & 115   \\
+        \wdc & 3841  & 8971 & 1000 (1000) & 3.5  & 2  & 11  \\
+        \voters & 14183  & 9819 & 5657 (6692) & 2.3  & 2   & 8   \\
+        %cddb & 9763  & 300  & 221 (9497) & 2.1  & 2   & 6  \\
+        %census & 841  & 344 & 333 (504) &  2.0  & 2   & 4   \\
+        %restaurant & 864  & 112 & 112 (749) & 2   & 2  & 2   \\
+        \hdashline
+        \synth & 39161  & 915128  & 3890 (10000) & 8.5 & 3  & 257   \\
+        %synth\_5000 & 19499  & 458786  & 1905 (5000) & 8.6 & 3  & 256   \\
+        %synth\_1000 & 4793  & 171835  & 386 (1000) & 8.5 & 3  & 256   \\
+        %synth\_250 & 1171  & 33901  & 105 (250) & 9.7 & 3  & 178   \\
+        
+
+        \hline
+    \end{tabular}
+    \caption{Dataset statistics. The Entities column reports the number of entities with size at least 2, with the total number of entities shown in parentheses. The Entity Sizes column excludes entities of size 1.}
+    \label{tab:dataset_table}
+\end{table}
+}
+
+Table~\ref{tab:upper_lower_bound} reports the lower and upper bounds of $\Phi_{10}$, as defined in Equation~\ref{eq:phi_b}, denoted by $\phi_{10}$ and $\overline{\Phi}_{10}$, respectively. 
+The upper bound $\overline{\Phi}_{10}$ is computed using the Python library \texttt{binpacking}\footnote{\url{https://pypi.org/project/binpacking/}}, which successfully finds the exact solution for all instances of Problem~\ref{prob:bin} considered in our experiments. 
+We observe that the lower and upper bounds differ by at most 3\%, indicating that the lower bound provides a tight approximation of $\Phi_{10}$.
+
+
+
+{\small
+\begin{table}[h!]
+\centering
+\begin{tabular}{c c c c c c c }
+\hline
+Bound & \cora & \camera & \funding & \wdc &\voters & \synth\\
+\hline
+$\phi_{10}$          & 137  & 2436  & 1612 & 391 & 1315 & 3514 \\
+$\overline\Phi_{10}$ & 137  & 2455  & 1640 & 396 & 1354 & 3544 \\
+\hline
+\hline
+error & // & 0.7\% & 1.7\% & 1.2\% & 2.9\% & 0.8\%\\
+\hline
+\end{tabular}
+\caption{Upper and lower bound of $\Phi_{10}$ for all datasets.}
+\label{tab:upper_lower_bound}
+\end{table}
+}
+
+
+
+
+
+\subsection{How to Choose among Different CDAs}\label{sub:communities_experiments}
+
+In our experiments, we tested 4 CDAs: the Louvain method~\cite{louvain}, the Leiden algorithm~\cite{leiden}, the Asynchronous Label Propagation Algorithm (aLPA)~\cite{lpa}, and the Infomap algorithm~\cite{infomap} (the specific parameter settings for these algorithms are available on our GitHub repository). We do not enter into the d we omit specific parameter settings as they are not critical for the scope of this paper, 
+a survey can be found in~\cite{survey_cda}. We only stress that all the previously cited CDAs are specialized for edge-weighted graphs.
+
+A key step of our algorithm consists of finding heavy communities, where a \emph{heavy} community is a community $c$ whose weight coefficient $\rho(c)$ is higher than the threshold $\lambda_w$. Table~\ref{tab:lambda_louvain} presents some statistics on the communities obtained by CDA Louvain on \funding, with a similarity graph having recall 0.96 and precision 0.06. In particular, \emph{record ratio} denotes the ratio between the number of records included in the heavy communities and the total number of records in the dataset, \emph{recall ratio} denotes the ratio of the recall in the heavy communities (we only considered intra-edge and not inter-edges) and the recall of the similarity graph; \emph{median size} denotes the median size of the communities; \emph{\# comm} denotes the number of heavy communities. Note that the intra-recall is the only parameter that is not observable.
+
+When $\lambda_w$ increases: the record ratio decreases because some records no longer belong to any community;  the number of communities %first increases because some communities are split into two or more communities, then, when $\lambda_w$ becomes high, it 
+decreases because some communities are no longer heavy and they become indivisible; the recall ratio, the median sizes' behaviors follow from above.
+
+{\small
+\begin{table}[h!]
+\centering
+\begin{tabular}{l c c c c c}
+\hline
+$\lambda_w$ & record ratio & edge ratio & recall ratio & median size & \# comm \\
+\hline
+0.05 & 0.979 & 0.265 & 0.958 & 48   & 313 \\
+0.10 & 0.935 & 0.184 & 0.931 & 25   & 291 \\
+0.15 & 0.834 & 0.139 & 0.901 & 20   & 291 \\
+0.20 & 0.739 & 0.107 & 0.881 & 17   & 171 \\
+0.25 & 0.681 & 0.096 & 0.852 & 16   & 171 \\
+0.30 & 0.632 & 0.086 & 0.827 & 16   & 166 \\
+0.35 & 0.588 & 0.077 & 0.812 & 16   & 166 \\
+0.40 & 0.548 & 0.071 & 0.803 & 16   & 147 \\
+0.45 & 0.497 & 0.063 & 0.758 & 15   & 126 \\
+0.50 & 0.455 & 0.057 & 0.707 & 15   & 126 \\
+0.55 & 0.398 & 0.049 & 0.626 & 15   & 126 \\
+0.60 & 0.328 & 0.038 & 0.496 & 14   & 104 \\
+\hline
+\end{tabular}
+\caption{Heavy communities statistics for \funding and CDA Louvain by varying the threshold $\lambda_w$.}
+\label{tab:lambda_louvain}
+\end{table}
+}
+
+Since our goal is to maximize the number of discovered match edges, we are interested in high values of intra-recall; unfortunately is the only value in Table~\ref{tab:lambda_louvain} that cannot be observed. Anyway, we note that for \funding there is a positive correlation between the record ratio and the intra-recall. Indeed, being the dense subgraphs of the similarity graph, we expect many match edges in each community, and few match edges between different communities. However, in a community, there are also low-strength records (records whose sum of adjacent edge weight is low) and light edges, which we can consider as noise. These light edges may correspond to non-match edges or to match edges with low weight. Clearly, the lower the threshold $\lambda_w$, the lower the density of communities and the higher the noise. In order to better describe our findings, we define a dataset \emph{dense} when the number of matches is greater than the number of records, and \emph{sparse} otherwise. Note that we do not have this information a priori.
+
+Now we describe how to better choose the value of $\lambda_w$ and the community detection algorithm. Being our approachal theoretical results, and we highlight the following general trends observed during our experiments.
+
+\begin{itemize}
+    \item the Louvain algorithm most frequently achieves the highest record ratio, followed by the Leiden algorithm,
+    \item if the dataset is dense, then for a fixed $\lambda_w$ the CDA algorithm with the higher record ratio tends to perform better,
+    \item if the dataset is sparse, then the record ratio  tends to be \emph{low} for \emph{high} values of $\lambda_w$, and \perbac tends to perform better than \perbacco, 
+    \item if the dataset is dense, then \perbacco performs better with $\lambda_w$ values close to 0.05.
+\end{itemize}
+
+Let us comment on the previous trends. The first one is a trivial observation we made through our experiments; it may not hold for different datasets, similarity graphs, CDA algorithms, or different CDAs parameters. The second trend can be explained by observing that if a CDA identifies more records belonging to heavy communities in a dense dataset, it is more likely that these heavy communities contain a higher number of matches; this, in turn, accelerates the discovery of matching edges. For the third trend, note that with high values of $\lambda_w$ we reduce the noise in the communities, implying that the heavy communities are expected to be mainly composed of match edges. So, if the record ratio is low with high values of $\lambda_w$, then the CDA suggests that the dataset doesn't contain many match edges, and thus the dataset is likely to be sparse. For the last trend, we observed that with dense datasets \perbacco tends to perform better with low values of $\lambda_w$, this happens because to noise, other than non-match edges, also contains match edges with low weights.
+
+
+Let's see the example reported in Table~\ref{tab:general_trends} about the performance of \perbacco with different parameters. We use the two datasets \funding and \voters, $\window = 10$, two different values of $\lambda_w$, 0.05 and 0.15, the two CDAs Louvain and Leiden, and we also ran the case without CDAs, corresponding to the algorithm pERbac. As reported in Table~\ref{tab:dataset_table}, \funding is dense, while \voters is sparse. 
+
+
+By using $\lambda_2 = 0.05$, the CDA Louvain reaches in both datasets a high value of record ratio. So we do not see a sensitive difference between these two datasets with $\lambda_2 = 0.05$. The situation completely changes when $\lambda_2 = 0.15$, where the CDA Louvain has very low values of record ratio for \voters, and high values for \funding. By the above, this suggests that \funding is dense, and \voters is sparse. Consequently, pERbac outperforms \perbacco on \voters, especially when the CDA has a high record ratio; indeed, the communities contain much noise consisting of non-match edges. On dataset \funding, being dense, \perbacco outperforms pERbac, and it reaches the best results at $\phi_{10}$ with $\lambda_w = 0.05$, where we denote by $\phi_b$ the lower bound of $\Phi_b$ in Equation~\ref{eq:phi_b}.
+
+
+
+%The third and fourth trends can be explained together. When $\lambda_w$ is \emph{high} (in our experiments, $\lambda_w\geq 0.2$), the CDA identifies only heavy communities with a very high edge weights density. When $\lambda_w$  is \emph{low}, some of these communities are merged (which does not affect the record ratio but may increase the intra-recall), while others incorporate records that can be regarded as noise (thus increasing both the record ratio and the intra-recall). Thus, when the record ratio is \emph{high} (in our experiments, rec, it indicates the presence of many heavy communities with a very high edge weights density, and by running \perbacco with a low value of $\lambda_w$ ensures the add of noise, which increases the intra-recall.
+
+
+%In Table~\ref{tab:general_trends} we report some experiments that validates the above general trends. We used the datasets \camera and \funding with $\window$ equal to 10 and we stopped after $\Phi_{10}$ queries, where $\Phi_b$ is defined in Theorem~\ref{th:query_min}. We reported only the two algorithms with the highest record ratio. In bold we highlight the setting that yielded the best performance for each dataset. \blue{An extension of Table~\ref{tab:general_trends} can be found in the Appendix (see Table~\ref{???})}. 
+
+\begin{comment}
+{\small
+\begin{table}[h]
+\centering
+\begin{tabular}{l c c c c c}
+\toprule
+\textbf{Dataset} & $\lambda_w$ & \textbf{CDA} & \textbf{record ratio} & \textbf{recall $\frac{\phi_{10}}{2}$}  & \textbf{recall $\phi_{10}$} \\
+
+\midrule
+\multirow{6}{*}{\funding} 
+  & \multirow{2}{*}{0.05}  & Louvain  & 0.98  & 0.633              & \textbf{0.884}\\
+  &                        & Leiden  & 0.71  & 0.558              & 0.856   \\
+\cmidrule(lr){2-6}
+  & \multirow{2}{*}{0.15}  & Louvain  & 0.83  & \underline{0.652} & 0.843 \\
+  &                        & Leiden  & 0.28  & \textbf{0.657}    & 0.797 \\
+
+  \cmidrule(lr){2-6}
+ &   \multirow{1}{*}{//}   & w/o CDA  & //   & 0.554             & 0.817 \\
+\midrule
+
+\multirow{6}{*}{\voters} 
+  & \multirow{2}{*}{0.05}  & Louvain & 0.80  & 0.084              & 0.232  \\
+  &                        & Leiden  & 0.10  & \underline{0.190}  & \underline{0.280} \\
+\cmidrule(lr){2-6}
+  & \multirow{2}{*}{0.15}  & Louvain & 0.08  & \underline{0.195}  & \textbf{0.289}  \\
+  &                        & Leiden  & 0.01  & \textbf{0.198}     & \underline{0.284}\\
+  \cmidrule(lr){2-6}
+ &   \multirow{1}{*}{//}   & w/o CDA  & //   & \textbf{0.198}     & \underline{0.284} \\
+\bottomrule
+\end{tabular}
+\caption{Performance of \perbacco for $\window=10$, and different datasets, CDAs and values of $\lambda_w$. Note that when no CDA is used, then \perbacco reduces to \perbac. In bold, the best combination of CDA and $\lambda$ for each dataset, and underlined the results close to the best.}
+\label{tab:general_trends}
+\end{table}
+}
+\end{comment}
+
+
+{\small
+\begin{table}[h]
+\centering
+\begin{tabular}{l c c c c}
+\toprule
+\textbf{Dataset} & $\lambda_w$ & \textbf{CDA} & \textbf{record ratio} & \textbf{recall} \\
+
+\midrule
+\multirow{6}{*}{\funding} 
+  & \multirow{2}{*}{0.05}  & Louvain  & 0.98 & \textbf{0.884}\\
+  &                        & Leiden  & 0.71  & 0.856   \\
+\cmidrule(lr){2-5}
+  & \multirow{2}{*}{0.15}  & Louvain  & 0.83 & 0.843 \\
+  &                        & Leiden  & 0.28  & 0.797 \\
+
+  \cmidrule(lr){2-5}
+ &   \multirow{1}{*}{//}   & w/o CDA  & //   & 0.817 \\
+\midrule
+
+\multirow{6}{*}{\voters} 
+  & \multirow{2}{*}{0.05}  & Louvain & 0.80  & 0.232  \\
+  &                        & Leiden  & 0.10  & \underline{0.280} \\
+\cmidrule(lr){2-5}
+  & \multirow{2}{*}{0.15}  & Louvain & 0.08  & \textbf{0.289}  \\
+  &                        & Leiden  & 0.01  & \underline{0.284}\\
+  \cmidrule(lr){2-5}
+ &   \multirow{1}{*}{//}   & w/o CDA  & //   & \underline{0.284} \\
+\bottomrule
+\end{tabular}
+\caption{Performance of \perbacco for $\window=10$, on different datasets, CDAs and values of $\lambda_w$. When no CDA is used, then \perbacco reduces to \perbac. Bold indicates the best combination of CDA and $\lambda$ for each dataset, and underlined results are close to the best. The recall ineral_trends}
+\end{table}
+}
+
+\begin{comment}
+\subsection{Complexity analysis}
+\begin{itemize}
+    \item il costo di una singola domanda consiste in: calcolare i benefit (e questo costa $O(\window^2 * n)$, basta vedere il Lemma 4 di DD), ordinare i benefit e eliminarne alcuni (in teoria posso avere $O(\window^2 * n)$ aggiornamenti al database, che può essere di dimensione $O(n^2)$ nel caso peggiore, quindi tenerlo ordinato può costare parecchio), a lanciare il GreedyHS. 
+    \item in generale noi abbiamo molti meno spigoli di Donatella-Divesh per via dell'insieme current che cresce poco alla volta. Infatti il numero degli spigoli "esplode" quando arrivo all'ultimo while.
+    \item inoltre l'analisi worst-case ha ancora meno senso perché è improbabile che tutti i vertici hanno  grado $n$. Però nel caso peggiore un vertice può avere caso $n$ anche se parto da grado limitato
+    \item forse direi semplicemente che DD non aggiornano sempre tutti i benefit, ma solo le probabilità, e poi calcolano i benefit dei primi $n$ spigoli con probabilità maggiore. Questo noi NON possiamo farlo perché usando la media si creano nuove probabilità (con il massimo questo non accade), e quindi queste nuove probabilità devono comunque essere ordinate. Dire anche che negli esperimenti abbiamo implementato DD ordinando i benefit; questo dovrebbe migliorare i risultati rispetto a considerare i primi $n$ come detto nel loro paper. 
+\end{itemize}
+\end{comment}
+
+\subsection{Suboptimal Solution}\label{sub:suboptimal_solution}
+
+As stated in Theorem~\ref{th:b_optimal_solution_not_exist}, a $b$-optimal solution does not exist in the general case. Moreover, maximizing the number of match edges at each query is an NP-hard problem, as shown in Theorem~\ref{th:progressive_is_NP_hard}. Nevertheless, Theorem~\ref{th:optimal} characterizes a $b$-optimal solution for some special cases, and Proposition~\ref{prop:max_gain_with_HSP} shows that this solution maximizes the number of match edges at each query. 
+
+Its implementation requires solving an instance of the Heaviest Subgraph Problem for each query. Since this problem is NP-hard, as previously stated, we call \emph{suboptimal} solution the algorithm of Theorem~\ref{th:optimal} where HSP is replaced by  $\textit{GreedyHS}_{1000}$. We recall that $\textit{GreedyHS}_{1000}(G,b)$ is equivalent to $\textit{GreedyHS}(G_{1000},b)$, where $G_{1000}$ is the subgraph of $G$ induced by its 1000 heaviest edges. 
+
+If $\window = 2$, a 2-optimal solution exists, as discussed in Subsection~\ref{sub:optimal_solution}. For other values of $\window$, we do not have any theoretical guarantee about the performance of the suboptimal solution. Nevertheless, in all our experiments the suboptimal solution achieves a recall of at least 0.98  after $\phi_{\window}$ queries on every tested dataset.
+
+
+\begin{figure*}[t!]
+    \centering
+    % --- Prima riga ---
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/cora_10.pdf}
+        \caption{\cora}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/camera_10.pdf}
+        \caption{\camera}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_10.pdf}
+        \caption{\funding}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/wdc80_10.pdf}
+        \caption{\wdc}
+    \end{subfigure}
+
+   spazio tra le righe
+
+    % --- Seconda riga ---
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/voters_10.pdf}
+        \caption{\voters}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_10000_10_0.5.pdf}
+        \caption{\synth, precision 0.5}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_10000_10_0.2.pdf}
+        \caption{\synth, precision 0.2}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_10000_10_0.05.pdf}
+        \caption{\synth, precision 0.05}
+    \end{subfigure}
+
+    \caption{Progressive recall on real and synthetic datasets with $\window = 10$.}
+    \label{fig:progressive_recall_window=10}
+\end{figure*}
+
+
+
+\subsection{Runtime Analysis}\label{sub:runtime_analysis}
+
+
+We observed that, for all the algorithms presented, the time required to compute the next query is dominated by the call to \textit{GreedyHS}. In particular, invoking $\textit{GreedyHS}(G(V,E),b)$ has a worst-case time complexity of $O(b|E|)$.
+
+In our implementations, we use a faster version of $\textit{GreedyHS}(G,b)$, denoted by $\textit{GreedyHS}_r(G(V,E),b)$, that equals to $\textit{GreedyHS}(G_r,b)$, where $G_r$ is the subgraph of $G$ induced by its heaviest $r$ edges, and we set $r= 100\cdot\window$. 
+Table~\ref{tab:runtime} shows the runtime of \perbacco, \DD, and \perbac on real datasets for the first $3\phi_{10}$ queries, and \perbacco turns out to be the fastest.
+Indeed, \perbacco processes communities sequentially; therefore, the initial queries are computed on graphs with a limited number of vertices and, consequently, few edges. 
+As the algorithm progresses, the set of considered records grows, leading to a corresponding increase in the number of edges.
+
+
+
+
+{\small
+\begin{table}[h!]
+\setlength{\tabcolsep}{2pt}
+\centering
+\begin{tabular}{l c c c c }
+\hline
+Dataset & $\perbacco$ & $\DD$ & $\perbac$ & \#queries\\
+\hline
+\cora    & 19   & 45  & 54    &  345 \\
+\camera  & 6287 & 13969 & 14722 &  7308 \\
+\wdc   & 150  & 244   & 243   &  1173  \\
+\funding & 611  & 1534  & 1826  &  4836  \\
+\voters  & 753  & 1002  & 974   &  3945   \\
+\hline
+\end{tabular}
+\caption{Runtime (in seconds) of \perbacco, \DD, and \perbac on real datasets for the first $3\phi_{10}$ queries.}
+\label{tab:runtime}
+\end{table}
+}
+
+\subsection{Evaluation}
+
+We compare our approach \perbacco with the competing algorithms  \perbac and \DD described in Subsection~\ref{sub:competing_algorithms}, and with the suboptimal solution discussed in Subsection~\ref{sub:suboptimal_solution}, denoted by \subopt.
+
+
+In Figure~\ref{fig:progressive_recall_window=10}, we compare the algorithms on datasets listed in Table~\ref{tab:dataset_table} with $\window$ equal to 10. For algorithm \perbacco, as discussed in Subsection~\ref{sub:communities_experiments}, we use the Louvain method for the community detection, and $\lambda_w=0.05$. All algorithms are implemented with $\textit{GreedyHS}_{1000}$ in place of $\textit{GreedyHS}$ to further speed up the computation, as described in Subsection~\ref{sub:runtime_analysis}. 
+
+First, note that \perbac outperforms \DD on all datasets at each query, even though \perbac is obtained from \DD with a small improvement (i.e., $\mu^{\text{mean}}$ instead of $\mu^{\max}$ in Equation~\ref{eq:benefit}).
+
+On the \funding and \wdc datasets, \perbaccevery query. On \cora, the algorithms perform similarly during the initial queries, after which \perbacco achieves higher recall. Note that, on \cora, all algorithms stop before $3\phi_{10}$ queries, as they resolve all edges in the similarity graph.
+
+On \camera, \perbacco exhibits a slow start. Upon inspection, we observed that the initial heavy communities contain few match edges, despite having many heavy edges, which explains the slow initial behavior. As noted in Subsection~\ref{sub:communities_experiments} and~\ref{sub:graph_partitioning}, the construction of heavy communities is based on a heuristic approach. Nevertheless, after $\phi_{10}$ queries, the recall values achieved by \perbacco are higher than those of the competing algorithms.
+
+
+
+\begin{figure*}[t!]
+    \centering
+    % --- Prima riga ---
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_2.pdf}
+        \caption{\funding with $\window = 2$}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_5.pdf}
+        \caption{\funding with $\window = 5$}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_20.pdf}
+        \caption{\funding with $\window = 20$}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_40.pdf}
+        \caption{\funding with $\window = 40$}
+    \end{subfigure}
+
+    \vspace{0.3cm} % spazio tra le righe
+
+    \caption{Progressive recall on \funding with $\window = 2,5,20$, and $40$.}
+    \label{fig:progressive_recall_funding}
+\end{figure*}
+
+On \voters, algorithm \perbacco performs worse than \perbac because the dataset is sparse. We point out that this behavior could be predicted a priori based on the analysis reported in Subsection~\ref{sub:communities_experiments}.
+
+On the synthetic dataset \synth, we observe that both \perbac and \perbacco are close to the suboptimal solution when the precision is 0.5 or 0.2. When the precision decreases to 0.05 -- which is more realistic at a recall of 0.95 -- \perbacco significantly outperforms \perbac. 
+It is worth noting that there is a huge difference between all algorithms in \camera and \synth with precision 0.05, despite the distributions of communities, edges, and weights are similar. This is due to the randomness of non-match edges in \synth. In contrast, in the real dataset \camera, the similarity graph is obtained via distances between records, thus similar records that do not represent the same entity are likely to share a heavy edge. 
+This makes it more difficult to discover heavy communities composed mainly by match edges.
+
+
+Figure~\ref{fig:progressive_recall_funding} reports a comparison of the considered algorithms on the \funding dataset for $b = 2, 5, 20,$ and $40$. Analogous results on the remaining datasets are omitted due to space constraints.
+When $b = 2$, we consider the classical pairwise comparison setting. In this case, a 2-optimal solution exists, as established in Theorem~\ref{th:optimal} and in~\cite{firmani2016online}, and we denote it by \texttt{Opt}. 
+For this setting, we note that the implementation of \DD coincides with the one presented in~\cite{firmani2016online}. Therefore, the results in the leftmost subfigure indicate that our approach improves the state of the art for pairwise Entity Resolution with an Oracle.
+
+Figure~\ref{fig:progressive_recall_funds exhibit similar behavior across different values of $b$, as the query axis is rescaled according to $\phi_b$. Overall, \perbacco consistently outperforms \DD at every query and almost always outperforms \perbac, highlighting the effectiveness of heavy communities.
+
+
+\begin{comment}
+    
+\begin{figure*}[!htb]
+    \centering
+    % --- Prima riga ---
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/cora_2.pdf}
+        \caption{\cora}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/camera_2.pdf}
+        \caption{\camera}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/funding_2.pdf}
+        \caption{\funding}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/wdc80_2.pdf}
+        \caption{\wdc}
+    \end{subfigure}
+
+    \vspace{0.3cm} % spazio tra le righe
+
+    % --- Seconda riga ---
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/voters_2.pdf}
+        \caption{\voters}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_250_2.pdf}
+        \caption{synth250}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_1000_2.pdf}
+        \caption{synth1000}
+    \end{subfigure}%
+    \begin{subfigure}{0.24\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/synth_5000_2.pdf}
+        \caption{synth5000}
+    \end{subfigure}
+
+    \caption{\blue{\window = 2}}
+    \label{fig:8plots}
+\end{figure*}
+\end{comment}
+
+
+
+
+
+
+
+
+
+\section{Related work}\label{sec:related_work}
+
+\noindent\textbf{Pay-as-you-go data integration.}
+The pay-as-you-go (a.k.a.\ progressive) approach to data integration was introduced to address scenarios in which integrating all data upfront is infeasible or impractical~\cite{DBLP:conf/cidr/MadhavanCDHJKY07}.
+In this line of research, progressive methods for entity resolution (ER) prioritize candidate record pairs according to their estimated likelihood of being true matches, to discover as many matches as early as possible~\cite{DBLP:journals/tkde/WhangMG13, papadakis_exploration, DBLP:journals/tkde/SimoniniPPB19, DBLP:journals/tkde/PapenbrockHN15, DBLP:journals/pvldb/SimoniniZBN22}.
+To the best of our knowledge, we propose the first study of a pay-as-you-go ER setting in which progress is achieved by querying an oracle over \emph{bounded-size sets} of records, rather than individual pairs.
+
+\noindent\textbf{ER using an oracle.}
+In the crowdsourcing literature, several works have explored ER abstractions that go beyond purely pairwise queries~\cite{waldo, crowder}.
+These approaches are motivated by human-in-the-loop settings, where an oracle (the crowd) is queried to determine match relationships among small groups of records.
+However, their setting is substantially different from ours. The hybrid approach in~\cite{waldo} relies on both pairwise and batch queries. Pairwise comparisons are considered more reliable and are used to resolve pairs with discordant answers across different batch queries.
+The method in~\cite{crowder} processes all the batches in parallel. As a result, answers obtained from earlier queries cannot be exploited to guide subsequent batch selection, preventingo resolution process. Moreover, this approach does not study how to adaptively select batches under a budget, nor does it provide a formal, model-independent oracle abstraction.
+%Existing crowdsourcing-based methods typically define batches upfront and process them independently or in parallel.
+%As a result, answers obtained from earlier queries cannot be exploited to guide subsequent batch selection, preventing a truly progressive, pay-as-you-go resolution process.
+%Moreover, these approaches do not study how to adaptively select batches under a budget, nor do they provide a formal, model-independent oracle abstraction.
+Similarly, we do not consider noisy or inconsistent oracle answers in this work.
+Handling errors arising from imperfect models or human annotation is a challenging problem in its own right and has been studied extensively in the context of crowdsourced ER, where the oracle abstraction is comparable (e.g.,~\cite{crowd_error_01,crowd_error_02,crowd_error_03,crowd_error_04}).
+In this work, we therefore abstract away from oracle errors to focus on the algorithmic problem of budget-aware batch selection.
+
+
+\noindent\textbf{ER with LLMs and Set-based models.}
+Besides the seminal paper~\cite{DBLP:journals/pvldb/NarayanCOR22}, Peeters et al.~\cite{DBLP:conf/edbt/PeetersSB25} provide a comprehensive analysis of LLM-based ER, which is primarily based on pairwise entity matching.
+More recently, \textsc{LLM-CER}~\cite{LLM-CER} and \textsc{ComME}~\cite{DBLP:conf/coling/WangCLCHSWZ25} show that LLMs can effectively act as \emph{bounded oracles} for ER by jointly clustering small sets of records within a single, carefully designed prompt, thus making multi-record ER feasible.
+However, these works focus on the behavior of individual queries and do not address how to allocate a limited budget of LLM calls at the dataset level.
+
+The idea of resolving entities by jointly analyzing sets of records is not specific to LLMs.
+Set-based models such as Set Transformers~\cite{DBLP:conf/icml/LeeLKKCT19}, as well as vision-based identity clustering systems~\cite{DBLP:conf/cvpr/SchroffKP15}, directly operate on bounded collections of items and infer clusters without reducing the task to independent pairwise comparisons.
+
+Our proposal is complementary to these lines of work.
+Rather than introducing a new oracle implementation, we study ER as a dataset-level inference problem under budget constraints, focusing on how to progressively resolve an entire dataset by adaptively selecting bounded-size oracle queries.
+
+
+\section{Conclusions}\label{sec:conclusions}
+
+% In this paper, we studied progressive batched entity resolution, a formulation allowing an oracle to resolve batches of records instead of pairs. 
+% We showed that, unlike the pairwise case, an optimal sequence of batch queries does not always exist, and that selecting batches to maximize the number of newly discovered matches is NP-hard. These results formally establish the increased computational complexity of allocating oracle queries at the dataset level and generalize the results for pairwise ER.
+
+% Our experimental evaluation on both real-world and synthetic datasets demonstrates that the proposed approach consistently achieves higher progressive recall than state-of-the-art baselines. Future work includes extending the framework to heterogeneous or noisy oracles.
+
+This paper studies entity resolution in a pay-as-you-go setting where an oracle jointly resolves bounded-size batches of records under a limited budget. This abstraction captures a wide range of modern resoluticml/LeeLKKCT19, DBLP:conf/cvpr/SchroffKP15} models, human-in-the-loop systems~\cite{crowder, waldo}, and LLMs~\cite{DBLP:conf/coling/WangCLCHSWZ25}, while remaining agnostic to the specific underlying model. We show that moving beyond pairwise queries fundamentally changes the problem: an optimal sequence of batch queries may not exist, and even selecting the next batch that maximizes immediate gain is NP-hard. These results clarify why strategies designed for pairwise ER~\cite{firmani2016online} do not directly extend to the batched setting.
+
+Building on this analysis, we proposed a practical approach for \emph{progressive batched entity resolution} that adaptively allocates oracle calls by exploiting similarity structure and previously acquired information.
+Experiments on real and synthetic datasets demonstrate that this strategy consistently achieves higher progressive recall than state-of-the-art baselines under comparable budgets, highlighting the benefits of explicitly reasoning over batches.
+
+As a final remark, we note that our solution assumes a consistent oracle to isolate the algorithmic problem of budget-aware batch selection.
+Extending the framework to handle noisy or erroneous oracle outputs, incorporating uncertainty into batch selection, and accounting for heterogeneous oracle costs are important, non-trivial directions for future research.
+
+
+
+\begin{acks}
+This work is partly funded by the HORIZON Research and Innovation Action 101135576 INTEND ``Intent-based data operation in the computing continuum''.
+\end{acks}
+
+%\clearpage
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{bib}
+
+
+
+
+
+
+
+
+
+
+
+
+
+\begin{comment}
+    
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/camera_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/camera_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/camera_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/camera_20.pdf}
+    \caption{\camera}
+    \label{fig:3_camera}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/funding_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/funding_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/funding_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/funding_20.pdf}
+    \caption{\funding}
+    \label{fig:3_funding}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/cora_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cora_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cora_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cora_20.pdf}
+    \caption{\cora}
+    \label{fig:3_cora}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/wdc80_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/wdc80_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/wdc80_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/wdc80_20.pdf}
+    \caption{\wdc}
+    \label{fig:3_wdc80}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/cddb_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cddb_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cddb_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cddb_20.pdf}
+    \caption{cddb}
+    \label{fig:3_cddb}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/census_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/cdth=0.32\textwidth]{figures/census_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/census_20.pdf}
+    \caption{census}
+    \label{fig:3_census}
+\end{figure*}
+
+
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/restaurant_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/restaurant_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/restaurant_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/restaurant_20.pdf}
+    \caption{restaurant}
+    \label{fig:3_restaurant}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    %\includegraphics[width=0.24\textwidth]{figures/voters_2.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/voters_5.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/voters_10.pdf}
+    \includegraphics[width=0.32\textwidth]{figures/voters_20.pdf}
+    \caption{\voters}
+    \label{fig:3_voters}
+\end{figure*}
+
+\section{PLOT 2}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.24\textwidth]{figures/camera_2.pdf}
+    \includegraphics[width=0.24\textwidth]{figures/funding_2.pdf}
+    \includegraphics[width=0.24\textwidth]{figures/cora_2.pdf}
+    \includegraphics[width=0.24\textwidth]{figures/wdc80_2.pdf}
+    \caption{PAIRS!!!! \camera, \funding, \cora, \wdc}
+    \label{fig:3_voters}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.24\textwidth]{figures/cddb_2.pdf}
+    \includegraphics[width=0.24\textwidth]{figures/census_2.pdf}
+    \includegraphics[width=0.24\textwidth]{figures/restaurant_2.pdf}
+    \caption{PAIRS!!!! cddb, census, restaurant}
+    \label{fig:3_voters}
+\end{figure*}
+\end{comment}
+
+
+
+\end{document}
+\endinput
+

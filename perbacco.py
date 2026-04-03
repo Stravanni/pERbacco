@@ -50,6 +50,7 @@ def parse_args():
     parser.add_argument("--openai_model", type=str, default=None)
     parser.add_argument("--prompt_mode", type=str, choices=["zero-shot", "few-shot"], default="zero-shot")
     parser.add_argument("--max_llm_calls", type=int, default=None)
+    parser.add_argument("--skip-batches", type=int, default=0)
     return parser.parse_args()
 
 
@@ -92,6 +93,7 @@ def build_output_path(
     openai_model=None,
     prompt_mode="zero-shot",
     max_llm_calls=None,
+    skip_batches=0,
 ):
     directory = Path("results") / dname
     if oracle_backend == "openai":
@@ -107,21 +109,25 @@ def build_output_path(
         parts.extend([sanitize_label(openai_model or "default"), prompt_mode])
         if max_llm_calls is not None:
             parts.append(f"cap{max_llm_calls}")
+        if skip_batches > 0:
+            parts.append(f"skip{skip_batches}")
         return directory / f"{','.join(parts)}.csv"
 
+    skip_suffix = f",skip{skip_batches}" if skip_batches > 0 else ""
+
     if optimal == "True":
-        return directory / f"{dname}_suboptimal,{batch_size}.csv"
+        return directory / f"{dname}_suboptimal,{batch_size}{skip_suffix}.csv"
 
     if "synth" in dname:
-        return directory / f"{dname},{synth_precision},{batch_size},{alg_community[:3]},{mu_benefit}.csv"
+        return directory / f"{dname},{synth_precision},{batch_size},{alg_community[:3]},{mu_benefit}{skip_suffix}.csv"
 
     if alg_community != "False":
-        return directory / f"{dname}_pERbacco,{batch_size},{alg_community[:3]},{lambda_w}.csv"
+        return directory / f"{dname}_pERbacco,{batch_size},{alg_community[:3]},{lambda_w}{skip_suffix}.csv"
 
     if mu_benefit == "brmean":
-        return directory / f"{dname}_pERbac,{batch_size}.csv"
+        return directory / f"{dname}_pERbac,{batch_size}{skip_suffix}.csv"
 
-    return directory / f"{dname}_Online,{batch_size}.csv"
+    return directory / f"{dname}_Online,{batch_size}{skip_suffix}.csv"
 
 
 def count_csv_rows(path):
@@ -141,11 +147,25 @@ def determine_expected_calls(args, effective_max_query):
         args.optimal,
         args.synth_precision,
         oracle_backend="groundtruth",
+        skip_batches=args.skip_batches,
     )
     baseline_rows = count_csv_rows(baseline_path)
     if baseline_rows is None:
         return effective_max_query, None
     return min(effective_max_query, baseline_rows), baseline_path
+
+
+def run_query(perbacco, ideal_tracker, batch, query_type, use_groundtruth=False):
+    original_backend = perbacco.oracle_backend
+    if use_groundtruth:
+        perbacco.oracle_backend = "groundtruth"
+    try:
+        perbacco.query(batch, query_type)
+    finally:
+        perbacco.oracle_backend = original_backend
+
+    if ideal_tracker is not None:
+        ideal_tracker.query(batch, query_type)
 
 
 def print_llm_estimate(perbacco, args, effective_max_query):
@@ -339,6 +359,8 @@ def main():
 
     if args.max_llm_calls is not None and args.max_llm_calls <= 0:
         raise SystemExit("--max_llm_calls must be positive when provided.")
+    if args.skip_batches < 0:
+        raise SystemExit("--skip-batches must be non-negative.")
 
     lambda_w = args.lambda_w
     if lambda_w != "False":
@@ -350,13 +372,19 @@ def main():
 
     df_ground_truth, graph = read_graph(args.dataset, synth_precision)
     max_query = compute_max_query(df_ground_truth, args.batch_size)
-    effective_max_query = max_query
+    remaining_query_budget = max(0, max_query - args.skip_batches)
+    effective_max_query = remaining_query_budget
     if args.max_llm_calls is not None:
-        effective_max_query = min(max_query, args.max_llm_calls)
+        effective_max_query = min(remaining_query_budget, args.max_llm_calls)
 
     random.seed(42)
     print("PRINT max_query for", args.dataset, "and batch_size", args.batch_size, max_query, flush=True)
-    if effective_max_query != max_query:
+    if args.skip_batches > 0:
+        print(
+            f"Applying ground-truth warmup: skip_batches={args.skip_batches} remaining_budget={remaining_query_budget}",
+            flush=True,
+        )
+    if effective_max_query != remaining_query_budget:
         print(f"Applying query cap: {effective_max_query}", flush=True)
 
     if args.optimal == "True":
@@ -422,12 +450,14 @@ def main():
     )
 
     number_query = 0
+    executed_query_count = 0
     old_true_positive_pairs = 0
     old_predicted_pairs = 0
     list_match_community_batch = []
     list_match_representative_batch = []
     perbacco.temperature = perbacco.batch_size
     total_time = 0
+    partial_time = 0
     nodes = set(perbacco.graph.nodes())
 
     if len(perbacco.list_community) > 1:
@@ -443,22 +473,20 @@ def main():
         ideal_tracker.create_dict_comm()
         ideal_tracker.with_community = perbacco.with_community
 
-    start_time = time.perf_counter()
     first_part = False
-    time_query_start = time.perf_counter()
 
     if perbacco.with_community == "T":
         first_part = True
         for community_nodes in perbacco.list_community[:-1]:
-            if number_query >= effective_max_query:
+            if number_query >= effective_max_query and executed_query_count >= args.skip_batches:
                 break
 
-            perbacco.query(community_nodes, "skip")
-            if ideal_tracker is not None:
-                ideal_tracker.query(community_nodes, "skip")
+            run_query(perbacco, ideal_tracker, community_nodes, "skip")
             current = set(community_nodes)
 
-            while len(current) >= perbacco.batch_size and number_query < effective_max_query:
+            while len(current) >= perbacco.batch_size and (
+                executed_query_count < args.skip_batches or number_query < effective_max_query
+            ):
                 subgraph = perbacco.graph.subgraph(current).copy()
                 vertex_weight_sum = {
                     node: sum(data["weight"] for _, _, data in subgraph.edges(node, data=True))
@@ -474,47 +502,20 @@ def main():
                 )
                 current = current.difference(query_comm)
 
-                number_query += 1
-                perbacco.query(query_comm, "entity")
-                if ideal_tracker is not None:
-                    ideal_tracker.query(query_comm, "entity")
-                time_query_stop = time.perf_counter()
-                time_query = time_query_stop - time_query_start
-                time_query_start = time.perf_counter()
+                executed_query_count += 1
+                is_warmup = executed_query_count <= args.skip_batches
+                time_query = None
+                if not is_warmup:
+                    number_query += 1
+                    query_timer_start = time.perf_counter()
+                run_query(perbacco, ideal_tracker, query_comm, "entity", use_groundtruth=is_warmup)
+                if not is_warmup:
+                    time_query = time.perf_counter() - query_timer_start
+                    total_time += time_query
                 metrics = perbacco.compute_metrics()
 
-                metrics = append_result(
-                    results,
-                    args,
-                    perbacco,
-                    ideal_tracker,
-                    number_query,
-                    effective_max_query,
-                    "COMMUNITY",
-                    time_query,
-                    metrics,
-                    metrics["true_positive_pairs"] - old_true_positive_pairs,
-                    metrics["predicted_pairs"] - old_predicted_pairs,
-                    query_comm,
-                )
                 delta_predicted_pairs = metrics["predicted_pairs"] - old_predicted_pairs
-                list_match_community_batch.append(delta_predicted_pairs)
-                old_true_positive_pairs = metrics["true_positive_pairs"]
-                old_predicted_pairs = metrics["predicted_pairs"]
-
-                set_higher_temperature = perbacco.compute_entity_higher_temperature()
-                while len(set_higher_temperature) == perbacco.batch_size and number_query < effective_max_query:
-                    current = current.difference(set(set_higher_temperature))
-                    number_query += 1
-
-                    perbacco.query(set_higher_temperature, "entity")
-                    if ideal_tracker is not None:
-                        ideal_tracker.query(set_higher_temperature, "entity")
-                    time_query_stop = time.perf_counter()
-                    time_query = time_query_stop - time_query_start
-                    time_query_start = time.perf_counter()
-                    metrics = perbacco.compute_metrics()
-
+                if not is_warmup:
                     metrics = append_result(
                         results,
                         args,
@@ -522,23 +523,65 @@ def main():
                         ideal_tracker,
                         number_query,
                         effective_max_query,
-                        "CURRENT",
+                        "COMMUNITY",
                         time_query,
                         metrics,
                         metrics["true_positive_pairs"] - old_true_positive_pairs,
-                        metrics["predicted_pairs"] - old_predicted_pairs,
-                        set_higher_temperature,
+                        delta_predicted_pairs,
+                        query_comm,
                     )
-                    delta_predicted_pairs = metrics["predicted_pairs"] - old_predicted_pairs
-                    list_match_representative_batch.append(delta_predicted_pairs)
-                    threshold_temp = (
-                        statistics.mean(list_match_community_batch)
-                        if len(list_match_community_batch) > 0
-                        else perbacco.batch_size / 2
-                    )
+                    list_match_community_batch.append(delta_predicted_pairs)
+                old_true_positive_pairs = metrics["true_positive_pairs"]
+                old_predicted_pairs = metrics["predicted_pairs"]
 
-                    if list_match_representative_batch[-1] <= threshold_temp:
-                        perbacco.temperature *= 2
+                set_higher_temperature = perbacco.compute_entity_higher_temperature()
+                while len(set_higher_temperature) == perbacco.batch_size and (
+                    executed_query_count < args.skip_batches or number_query < effective_max_query
+                ):
+                    current = current.difference(set(set_higher_temperature))
+                    executed_query_count += 1
+                    is_warmup = executed_query_count <= args.skip_batches
+                    time_query = None
+                    if not is_warmup:
+                        number_query += 1
+                        query_timer_start = time.perf_counter()
+                    run_query(
+                        perbacco,
+                        ideal_tracker,
+                        set_higher_temperature,
+                        "entity",
+                        use_groundtruth=is_warmup,
+                    )
+                    if not is_warmup:
+                        time_query = time.perf_counter() - query_timer_start
+                        total_time += time_query
+                    metrics = perbacco.compute_metrics()
+
+                    delta_predicted_pairs = metrics["predicted_pairs"] - old_predicted_pairs
+                    if not is_warmup:
+                        metrics = append_result(
+                            results,
+                            args,
+                            perbacco,
+                            ideal_tracker,
+                            number_query,
+                            effective_max_query,
+                            "CURRENT",
+                            time_query,
+                            metrics,
+                            metrics["true_positive_pairs"] - old_true_positive_pairs,
+                            delta_predicted_pairs,
+                            set_higher_temperature,
+                        )
+                        list_match_representative_batch.append(delta_predicted_pairs)
+                        threshold_temp = (
+                            statistics.mean(list_match_community_batch)
+                            if len(list_match_community_batch) > 0
+                            else perbacco.batch_size / 2
+                        )
+
+                        if list_match_representative_batch[-1] <= threshold_temp:
+                            perbacco.temperature *= 2
 
                     set_higher_temperature = perbacco.compute_entity_higher_temperature()
                     old_true_positive_pairs = metrics["true_positive_pairs"]
@@ -547,56 +590,56 @@ def main():
                 perbacco.temperature *= 1 - 1 / perbacco.batch_size
 
     number_query_first_part = number_query
-    stop_time = time.perf_counter()
-    total_time += stop_time - start_time
 
-    if number_query < effective_max_query:
+    if executed_query_count < args.skip_batches or number_query < effective_max_query:
         all_nodes = list(perbacco.list_community[-1])
-        perbacco.query(all_nodes, "last")
-        if ideal_tracker is not None:
-            ideal_tracker.query(all_nodes, "last")
+        run_query(perbacco, ideal_tracker, all_nodes, "last")
 
     perbacco.temperature = 0
-    start_time = time.perf_counter()
     second_part = False
     random.seed(42)
     perbacco.df_benefit = perbacco.df_benefit.sort_values(by="benefit", ascending=False, ignore_index=False)
     if ideal_tracker is not None:
         ideal_tracker.df_benefit = ideal_tracker.df_benefit.sort_values(by="benefit", ascending=False, ignore_index=False)
 
-    while number_query < effective_max_query and len(perbacco.df_benefit) > 0:
-        second_part = True
-        number_query += 1
+    while len(perbacco.df_benefit) > 0 and (
+        executed_query_count < args.skip_batches or number_query < effective_max_query
+    ):
+        executed_query_count += 1
         batch = perbacco.compute_entity_higher_temperature()
-        perbacco.query(batch, "entity")
-        if ideal_tracker is not None:
-            ideal_tracker.query(batch, "entity")
-        time_query_stop = time.perf_counter()
-        time_query = time_query_stop - time_query_start
-        time_query_start = time.perf_counter()
+        is_warmup = executed_query_count <= args.skip_batches
+        time_query = None
+        if not is_warmup:
+            second_part = True
+            number_query += 1
+            query_timer_start = time.perf_counter()
+        run_query(perbacco, ideal_tracker, batch, "entity", use_groundtruth=is_warmup)
+        if not is_warmup:
+            time_query = time.perf_counter() - query_timer_start
+            total_time += time_query
+            partial_time += time_query
         metrics = perbacco.compute_metrics()
 
-        metrics = append_result(
-            results,
-            args,
-            perbacco,
-            ideal_tracker,
-            number_query,
-            effective_max_query,
-            "CURRENT",
-            time_query,
-            metrics,
-            metrics["true_positive_pairs"] - old_true_positive_pairs,
-            metrics["predicted_pairs"] - old_predicted_pairs,
-            batch,
-        )
-        list_match_community_batch.append(metrics["predicted_pairs"] - old_predicted_pairs)
+        delta_predicted_pairs = metrics["predicted_pairs"] - old_predicted_pairs
+        if not is_warmup:
+            metrics = append_result(
+                results,
+                args,
+                perbacco,
+                ideal_tracker,
+                number_query,
+                effective_max_query,
+                "CURRENT",
+                time_query,
+                metrics,
+                metrics["true_positive_pairs"] - old_true_positive_pairs,
+                delta_predicted_pairs,
+                batch,
+            )
+            list_match_community_batch.append(delta_predicted_pairs)
         old_true_positive_pairs = metrics["true_positive_pairs"]
         old_predicted_pairs = metrics["predicted_pairs"]
 
-    stop_time = time.perf_counter()
-    partial_time = stop_time - start_time
-    total_time += partial_time
     write_time_summary(args, perbacco, total_time, number_query, number_query_first_part, partial_time, second_part)
 
     save_auxiliary_lists(args, perbacco)
@@ -613,9 +656,12 @@ def main():
         openai_model=args.openai_model,
         prompt_mode=args.prompt_mode,
         max_llm_calls=args.max_llm_calls if args.oracle_backend == "openai" else None,
+        skip_batches=args.skip_batches,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(output_path, index=False)
+    if args.skip_batches > 0 and executed_query_count <= args.skip_batches:
+        print("Warmup consumed all available batches; no evaluated rows were recorded.", flush=True)
     if len(results) > 0 and ideal_tracker is not None:
         final_metrics = perbacco.compute_metrics()
         final_ideal_metrics = ideal_tracker.compute_metrics()
