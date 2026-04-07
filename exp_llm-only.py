@@ -1,95 +1,38 @@
 import argparse
 import csv
 import importlib.util
+import json
 import queue
 import re
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 
-DATASET = "cora"
-BATCH_SIZE = 10
+DEFAULT_DATASET = "cora"
+DEFAULT_BATCH_SIZE = 10
 LAMBDA_W = "0.05"
 
-RESULTS_DIR = Path("results") / DATASET
-FIGURES_DIR = Path("figures")
-
-BASE_METHODS = (
-    {
-        "label": "SubOpt",
-        "color": "green",
-        "linestyle": ":",
-        "filename": f"{DATASET}_suboptimal,{BATCH_SIZE}.csv",
-        "args": [
-            "--alg_community",
-            "False",
-            "--lambda_w",
-            "False",
-            "--mu_benefit",
-            "brmax",
-            "--optimal",
-            "True",
-            "--synth_precision",
-            "False",
-        ],
-    },
-    {
-        "label": "pERbacco",
-        "color": "red",
-        "linestyle": "-",
-        "filename": f"{DATASET}_pERbacco,{BATCH_SIZE},lou,{LAMBDA_W}.csv",
-        "args": [
-            "--alg_community",
-            "louvain",
-            "--lambda_w",
-            LAMBDA_W,
-            "--mu_benefit",
-            "brmean",
-            "--optimal",
-            "False",
-            "--synth_precision",
-            "False",
-        ],
-    },
-    {
-        "label": "pERbac",
-        "color": "blue",
-        "linestyle": "--",
-        "filename": f"{DATASET}_pERbac,{BATCH_SIZE}.csv",
-        "args": [
-            "--alg_community",
-            "False",
-            "--lambda_w",
-            "False",
-            "--mu_benefit",
-            "brmean",
-            "--optimal",
-            "False",
-            "--synth_precision",
-            "False",
-        ],
-    },
-    {
-        "label": "Online",
-        "color": "yellow",
-        "linestyle": "-.",
-        "filename": f"{DATASET}_Online,{BATCH_SIZE}.csv",
-        "args": [
-            "--alg_community",
-            "False",
-            "--lambda_w",
-            "False",
-            "--mu_benefit",
-            "brmax",
-            "--optimal",
-            "False",
-            "--synth_precision",
-            "False",
-        ],
-    },
+DATASET_CHOICES = (
+    "cora",
+    "camera",
+    "funding",
+    "voters",
+    "cddb",
+    "restaurant",
+    "wdc20",
+    "wdc50",
+    "wdc80",
+    "census",
+    "synth_250",
+    "synth_1000",
+    "synth_5000",
+    "synth_10000",
 )
+
+FIGURES_DIR = Path("figures")
 
 REQUIRED_MODULES = (
     "IPython",
@@ -108,59 +51,165 @@ REQUIRED_MODULES = (
     "tqdm",
 )
 
+MAX_QUERY_PATTERN = re.compile(r"^PRINT max_query for\s+\S+\s+and batch_size\s+\d+\s+(\d+)\s*$")
+QUERY_PROGRESS_PATTERN = re.compile(r"^(?P<current>\d+)/(?P<total>\d+)\s")
+
 
 def sanitize_label(value):
     return str(value).replace("/", "-").replace(" ", "-").replace(":", "-")
 
 
-MAX_QUERY_PATTERN = re.compile(r"^PRINT max_query for\s+\S+\s+and batch_size\s+\d+\s+(\d+)\s*$")
-QUERY_PROGRESS_PATTERN = re.compile(r"^(?P<current>\d+)/(?P<total>\d+)\s")
+def build_manifest_path(csv_path):
+    return csv_path.parent / f"{csv_path.name}.complete.json"
 
 
-def build_llm_filename(model, prompt_mode):
-    parts = [
-        f"{DATASET}_LLM-pERbacco",
-        str(BATCH_SIZE),
-        "lou",
-        LAMBDA_W,
-        sanitize_label(model),
-        prompt_mode,
-    ]
+def build_resume_path(csv_path):
+    return csv_path.parent / f"{csv_path.name}.resume.pkl"
+
+
+def get_results_dir(dataset):
+    return Path("results") / dataset
+
+
+def build_llm_filename(dataset, batch_size, method_key, model, prompt_mode):
+    method_label = {
+        "perbacco": "LLM-pERbacco",
+        "perbac": "LLM-pERbac",
+        "online": "LLM-Online",
+    }[method_key]
+
+    parts = [f"{dataset}_{method_label}", str(batch_size)]
+    if method_key == "perbacco":
+        parts.extend(["lou", LAMBDA_W])
+    parts.extend([sanitize_label(model), prompt_mode])
     return f"{','.join(parts)}.csv"
 
 
 def build_methods(args):
-    methods = [dict(method, marker=None) for method in BASE_METHODS]
-    if args.include_llm:
-        methods.append(
-            {
-                "label": f"LLM-{args.prompt_mode}",
-                "color": "black",
-                "linestyle": "-",
-                "marker": None,
-                "track_query_progress": True,
-                "filename": build_llm_filename(args.openai_model, args.prompt_mode),
-                "args": [
-                    "--alg_community",
-                    "louvain",
-                    "--lambda_w",
-                    LAMBDA_W,
-                    "--mu_benefit",
-                    "brmean",
-                    "--optimal",
-                    "False",
-                    "--synth_precision",
-                    "False",
-                    "--oracle_backend",
-                    "openai",
-                    "--openai_model",
-                    args.openai_model,
-                    "--prompt_mode",
-                    args.prompt_mode,
-                ],
-            }
-        )
-    return methods
+    return [
+        {
+            "label": "Ideal",
+            "color": "green",
+            "linestyle": ":",
+            "marker": None,
+            "track_query_progress": True,
+            "requires_manifest": False,
+            "filename": f"{args.dataset}_suboptimal,{args.batch_size}.csv",
+            "args": [
+                "--alg_community",
+                "False",
+                "--lambda_w",
+                "False",
+                "--mu_benefit",
+                "brmax",
+                "--optimal",
+                "True",
+                "--synth_precision",
+                "False",
+                "--oracle_backend",
+                "groundtruth",
+            ],
+        },
+        {
+            "label": "pERbacco + LLM",
+            "color": "red",
+            "linestyle": "-",
+            "marker": None,
+            "track_query_progress": True,
+            "requires_manifest": True,
+            "filename": build_llm_filename(
+                args.dataset,
+                args.batch_size,
+                "perbacco",
+                args.openai_model,
+                args.prompt_mode,
+            ),
+            "args": [
+                "--alg_community",
+                "louvain",
+                "--lambda_w",
+                LAMBDA_W,
+                "--mu_benefit",
+                "brmean",
+                "--optimal",
+                "False",
+                "--synth_precision",
+                "False",
+                "--oracle_backend",
+                "openai",
+                "--openai_model",
+                args.openai_model,
+                "--prompt_mode",
+                args.prompt_mode,
+            ],
+        },
+        {
+            "label": "pERbac + LLM",
+            "color": "blue",
+            "linestyle": "--",
+            "marker": None,
+            "track_query_progress": True,
+            "requires_manifest": True,
+            "filename": build_llm_filename(
+                args.dataset,
+                args.batch_size,
+                "perbac",
+                args.openai_model,
+                args.prompt_mode,
+            ),
+            "args": [
+                "--alg_community",
+                "False",
+                "--lambda_w",
+                "False",
+                "--mu_benefit",
+                "brmean",
+                "--optimal",
+                "False",
+                "--synth_precision",
+                "False",
+                "--oracle_backend",
+                "openai",
+                "--openai_model",
+                args.openai_model,
+                "--prompt_mode",
+                args.prompt_mode,
+            ],
+        },
+        {
+            "label": "Online + LLM",
+            "color": "yellow",
+            "linestyle": "-.",
+            "marker": None,
+            "track_query_progress": True,
+            "requires_manifest": True,
+            "filename": build_llm_filename(
+                args.dataset,
+                args.batch_size,
+                "online",
+                args.openai_model,
+                args.prompt_mode,
+            ),
+            "args": [
+                "--alg_community",
+                "False",
+                "--lambda_w",
+                "False",
+                "--mu_benefit",
+                "brmax",
+                "--optimal",
+                "False",
+                "--synth_precision",
+                "False",
+                "--oracle_backend",
+                "openai",
+                "--openai_model",
+                args.openai_model,
+                "--prompt_mode",
+                args.prompt_mode,
+            ],
+        },
+    ]
 
 
 def q_rec_k(size, batch_size):
@@ -260,34 +309,63 @@ def compute_phi(dataset_dir, batch_size):
     return minimum_queries + ((sum(rests) + batch_size - 1) // batch_size)
 
 
-def prepare_method_run(method, force):
-    output_path = RESULTS_DIR / method["filename"]
+def write_manifest(manifest_path, method, command, output_path):
+    manifest = {
+        "method": method["label"],
+        "csv_path": str(output_path),
+        "command": command,
+        "completed_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "status": "completed",
+    }
+    with manifest_path.open("w") as handle:
+        json.dump(manifest, handle, indent=2)
+
+
+def prepare_method_run(args, method, force):
+    results_dir = get_results_dir(args.dataset)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    output_path = results_dir / method["filename"]
+    manifest_path = build_manifest_path(output_path)
     command = [
         sys.executable,
         "perbacco.py",
         "--dataset",
-        DATASET,
+        args.dataset,
         "--batch_size",
-        str(BATCH_SIZE),
+        str(args.batch_size),
         *method["args"],
     ]
 
-    return {
+    run = {
         **method,
         "output_path": output_path,
+        "manifest_path": manifest_path,
         "command": command,
-        "skip": output_path.exists() and not force,
-        "skip_reason": f"Skipping {method['label']}: {output_path} already exists",
-        "rerun_reason": f"Re-running {method['label']}: {output_path} because --force was set"
-        if force and output_path.exists()
-        else "",
+        "skip": False,
+        "skip_reason": "",
+        "rerun_reason": "",
         "process": None,
         "reader_thread": None,
         "reader_done": False,
         "progress_current": 0,
         "progress_total": 0,
         "finalized": False,
+        "insufficient_quota": False,
+        "last_error_line": "",
     }
+
+    if output_path.exists() and not force:
+        if not method["requires_manifest"] or manifest_path.exists():
+            run["skip"] = True
+            run["skip_reason"] = f"Skipping {method['label']}: {output_path} already verified"
+        else:
+            run["rerun_reason"] = (
+                f"Re-running {method['label']}: {output_path} exists but has no completion manifest"
+            )
+    elif force and output_path.exists():
+        run["rerun_reason"] = f"Re-running {method['label']}: {output_path} because --force was set"
+
+    return run
 
 
 def apply_method_total(run, progress_bar, total):
@@ -311,6 +389,11 @@ def apply_method_progress(run, progress_bar, current, total):
 
 def handle_method_output_line(run, line, progress_bar):
     from tqdm import tqdm
+
+    if "insufficient_quota" in line or "You exceeded your current quota" in line:
+        run["insufficient_quota"] = True
+    if "Traceback" in line or "RuntimeError:" in line or "OpenAI API request failed" in line:
+        run["last_error_line"] = line
 
     if run.get("track_query_progress"):
         max_query_match = MAX_QUERY_PATTERN.match(line)
@@ -347,12 +430,18 @@ def finalize_successful_run(run, progress_bar):
         run["progress_current"] += remaining
         progress_bar.refresh()
 
+    if run["requires_manifest"]:
+        write_manifest(run["manifest_path"], run, run["command"], run["output_path"])
+
     run["finalized"] = True
     tqdm.write(f"Completed {run['label']}: {run['output_path']}")
 
 
 def start_run_process(run):
     from tqdm import tqdm
+
+    if run["manifest_path"].exists():
+        run["manifest_path"].unlink()
 
     if run["rerun_reason"]:
         tqdm.write(run["rerun_reason"])
@@ -399,6 +488,26 @@ def terminate_run(run, reason):
         process.wait(timeout=5)
 
 
+def format_resume_status(run):
+    checkpoint_path = build_resume_path(run["output_path"])
+    if checkpoint_path.exists():
+        return f"checkpoint available at {checkpoint_path}"
+    if run["output_path"].exists():
+        return f"partial CSV present at {run['output_path']}, but no checkpoint"
+    return "no checkpoint found"
+
+
+def raise_quota_error(run):
+    detail = format_resume_status(run)
+    raise SystemExit(
+        "OpenAI quota exhausted for "
+        f"{run['label']}. "
+        "The API returned insufficient_quota (HTTP 429). "
+        "Restore quota or billing, then rerun the same command to resume if possible. "
+        f"Resume status: {detail}."
+    )
+
+
 def run_method_serial(run):
     from tqdm import tqdm
 
@@ -417,6 +526,8 @@ def run_method_serial(run):
         return_code = process.wait()
         if return_code != 0:
             tqdm.write(f"{run['label']} failed with exit code {return_code}")
+            if run["insufficient_quota"]:
+                raise_quota_error(run)
             raise subprocess.CalledProcessError(return_code, run["command"])
 
         finalize_successful_run(run, progress_bar)
@@ -492,7 +603,9 @@ def run_methods_parallel(runs):
                 if active_run["reader_done"] and active_process.poll() == 0:
                     finalize_successful_run(active_run, progress_bar)
                     continue
-                terminate_run(active_run, f"{failure_run['label']} failed")
+                terminate_run(runs_by_label[active_label], f"{failure_run['label']} failed")
+            if failure_run["insufficient_quota"]:
+                raise_quota_error(failure_run)
             raise subprocess.CalledProcessError(process.returncode, failure_run["command"])
     finally:
         progress_bar.close()
@@ -502,29 +615,53 @@ def run_methods_parallel(runs):
                 reader_thread.join(timeout=1)
 
 
+def read_csv_rows(csv_path):
+    with csv_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    if not rows:
+        raise SystemExit(f"Empty experiment output: {csv_path}")
+    return rows
+
+
 def read_recall_series(csv_path, max_query):
     recalls = [0.0]
-    with csv_path.open(newline="") as handle:
-        reader = csv.DictReader(handle)
-        for index, row in enumerate(reader, start=1):
-            if index > max_query:
-                break
-            recall = float(row["recall"])
-            recalls.append(recall)
-            if recall >= 1.0:
-                break
+    for index, row in enumerate(read_csv_rows(csv_path), start=1):
+        if index > max_query:
+            break
+        recall = float(row["recall"])
+        recalls.append(recall)
+        if recall >= 1.0:
+            break
     return recalls
 
 
-def build_plot(phi, max_query, methods):
+def compute_llm_ceiling(methods, results_dir):
+    best_label = None
+    best_recall = None
+    for method in methods:
+        if not method["requires_manifest"]:
+            continue
+        rows = read_csv_rows(results_dir / method["filename"])
+        final_recall = float(rows[-1]["recall"])
+        if best_recall is None or final_recall > best_recall:
+            best_recall = final_recall
+            best_label = method["label"]
+
+    if best_recall is None or best_recall <= 0:
+        raise SystemExit("Unable to normalize recalls: best final LLM recall must be positive.")
+
+    return best_recall, best_label
+
+
+def plot_series(methods, results_dir, batch_size, phi, max_query, ylabel, pdf_path, png_path, transform):
     import matplotlib.pyplot as plt
 
     FIGURES_DIR.mkdir(parents=True, exist_ok=True)
 
     plt.figure(figsize=(4.6, 2.7))
     for method in methods:
-        csv_path = RESULTS_DIR / method["filename"]
-        recalls = read_recall_series(csv_path, max_query)
+        csv_path = results_dir / method["filename"]
+        recalls = transform(method, read_recall_series(csv_path, max_query))
         x_values = range(len(recalls))
         plt.plot(
             x_values,
@@ -538,35 +675,82 @@ def build_plot(phi, max_query, methods):
 
     plt.xlim(0, max_query)
     plt.ylim(0, 1)
-    plt.xlabel(rf"number query ($\phi_{{{BATCH_SIZE}}} = {phi}$)")
-    plt.ylabel("recall")
+    plt.xlabel(rf"number query ($\phi_{{{batch_size}}} = {phi}$)")
+    plt.ylabel(ylabel)
     plt.xticks([0, phi, 2 * phi, 3 * phi], [0, phi, 2 * phi, 3 * phi])
     plt.yticks([0.0, 0.25, 0.5, 0.75, 1.0])
     plt.grid(True, alpha=0.3)
     plt.legend(loc="lower right")
     plt.tight_layout()
 
-    suffix = ""
-    if any(method["label"].startswith("LLM-") for method in methods):
-        suffix = f"_llm_{sanitize_label(methods[-1]['label'])}"
-
-    pdf_path = FIGURES_DIR / f"{DATASET}_{BATCH_SIZE}{suffix}.pdf"
-    png_path = FIGURES_DIR / f"{DATASET}_{BATCH_SIZE}{suffix}.png"
     plt.savefig(pdf_path, bbox_inches="tight", pad_inches=0.02)
     plt.savefig(png_path, dpi=200, bbox_inches="tight", pad_inches=0.02)
     plt.close()
 
+
+def build_true_ideal_plot(methods, results_dir, batch_size, phi, max_query, figure_prefix):
+    pdf_path = FIGURES_DIR / f"{figure_prefix}_true-ideal.pdf"
+    png_path = FIGURES_DIR / f"{figure_prefix}_true-ideal.png"
+    plot_series(
+        methods,
+        results_dir,
+        batch_size,
+        phi,
+        max_query,
+        "recall",
+        pdf_path,
+        png_path,
+        transform=lambda _method, recalls: recalls,
+    )
+    return pdf_path, png_path
+
+
+def build_normalized_plot(methods, results_dir, batch_size, phi, max_query, figure_prefix, llm_ceiling):
+    def transform(method, recalls):
+        normalized = []
+        for recall in recalls:
+            scaled = recall / llm_ceiling
+            if not method["requires_manifest"]:
+                scaled = min(recall, llm_ceiling) / llm_ceiling
+            normalized.append(min(scaled, 1.0))
+        return normalized
+
+    pdf_path = FIGURES_DIR / f"{figure_prefix}_ideal-normalized.pdf"
+    png_path = FIGURES_DIR / f"{figure_prefix}_ideal-normalized.png"
+    plot_series(
+        methods,
+        results_dir,
+        batch_size,
+        phi,
+        max_query,
+        "normalized recall",
+        pdf_path,
+        png_path,
+        transform=transform,
+    )
     return pdf_path, png_path
 
 
 def parse_cli_args():
     parser = argparse.ArgumentParser(
-        description="Run the Cora-only experiments needed for Figure 3(a) and recreate the plot."
+        description="Run the LLM-oracle variant of Figure 3 and create true-ideal and normalized plots."
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=DATASET_CHOICES,
+        default=DEFAULT_DATASET,
+        help="Dataset to run.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Batch size to use for all methods.",
     )
     parser.add_argument(
         "--skip-run",
         action="store_true",
-        help="Reuse existing CSV files in results/cora and only generate the plot.",
+        help="Reuse existing CSV files in results/<dataset> and only generate the plots.",
     )
     parser.add_argument(
         "--force",
@@ -574,20 +758,15 @@ def parse_cli_args():
         help="Rerun the experiments even if the expected CSV files already exist.",
     )
     parser.add_argument(
-        "--include-llm",
-        action="store_true",
-        help="Add one LLM-backed pERbacco line to the figure.",
-    )
-    parser.add_argument(
         "--openai-model",
         default="gpt-5-mini",
-        help="Model to use for the LLM-backed line.",
+        help="Model to use for the OpenAI-backed methods.",
     )
     parser.add_argument(
         "--prompt-mode",
         choices=["zero-shot", "few-shot"],
         default="zero-shot",
-        help="Prompting mode for the LLM-backed line.",
+        help="Prompting mode for the OpenAI-backed methods.",
     )
     return parser.parse_args()
 
@@ -599,15 +778,18 @@ def main():
     ensure_dependencies()
 
     methods = build_methods(args)
-    phi = compute_phi(Path("datasets") / DATASET, BATCH_SIZE)
+    results_dir = get_results_dir(args.dataset)
+    phi = compute_phi(Path("datasets") / args.dataset, args.batch_size)
     max_query = 3 * phi
+    figure_prefix = (
+        f"{args.dataset}_{args.batch_size}_llm-only_{sanitize_label(args.openai_model)}_{sanitize_label(args.prompt_mode)}"
+    )
 
-    if phi != 137:
-        print(f"Warning: computed phi_{BATCH_SIZE} for {DATASET} is {phi}, expected 137.")
+    if args.dataset == "cora" and args.batch_size == 10 and phi != 137:
+        print(f"Warning: computed phi_{args.batch_size} for {args.dataset} is {phi}, expected 137.")
 
     if not args.skip_run:
-        RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-        prepared_runs = [prepare_method_run(method, force=args.force) for method in methods]
+        prepared_runs = [prepare_method_run(args, method, force=args.force) for method in methods]
         runnable_runs = []
         for run in prepared_runs:
             if run["skip"]:
@@ -621,18 +803,39 @@ def main():
             run_methods_parallel(runnable_runs)
 
     missing_outputs = [
-        str(RESULTS_DIR / method["filename"])
+        str(results_dir / method["filename"])
         for method in methods
-        if not (RESULTS_DIR / method["filename"]).exists()
+        if not (results_dir / method["filename"]).exists()
     ]
     if missing_outputs:
         joined = "\n".join(missing_outputs)
         raise SystemExit(f"Missing experiment outputs:\n{joined}")
 
-    pdf_path, png_path = build_plot(phi, max_query, methods)
-    print(f"phi_{BATCH_SIZE}({DATASET}) = {phi}")
-    print(f"Saved plot to {pdf_path}")
-    print(f"Saved plot to {png_path}")
+    llm_ceiling, llm_ceiling_label = compute_llm_ceiling(methods, results_dir)
+    true_pdf_path, true_png_path = build_true_ideal_plot(
+        methods,
+        results_dir,
+        args.batch_size,
+        phi,
+        max_query,
+        figure_prefix,
+    )
+    normalized_pdf_path, normalized_png_path = build_normalized_plot(
+        methods,
+        results_dir,
+        args.batch_size,
+        phi,
+        max_query,
+        figure_prefix,
+        llm_ceiling,
+    )
+
+    print(f"phi_{args.batch_size}({args.dataset}) = {phi}")
+    print(f"Ideal-normalized ceiling: {llm_ceiling:.6f} from {llm_ceiling_label}")
+    print(f"Saved plot to {true_pdf_path}")
+    print(f"Saved plot to {true_png_path}")
+    print(f"Saved plot to {normalized_pdf_path}")
+    print(f"Saved plot to {normalized_png_path}")
 
 
 if __name__ == "__main__":

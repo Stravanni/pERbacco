@@ -3,6 +3,7 @@ import itertools
 import json
 import math
 import os
+import pickle
 import random
 import statistics
 import time
@@ -16,6 +17,29 @@ from class_pERbacco import class_entity, q_rec_k, r_rec_k, read_graph
 
 
 k_minimum_queries = 3
+RESUME_VERSION = 1
+RESULT_COLUMNS = [
+    "number_query",
+    "kind",
+    "temperature",
+    "recall",
+    "precision",
+    "total_match",
+    "predicted_pairs",
+    "true_positive_pairs",
+    "len_df_benefit",
+    "progressive_recall",
+    "predicted_delta_pairs",
+    "progress_percent",
+    "llm_input_tokens",
+    "llm_output_tokens",
+    "llm_total_tokens",
+    "ideal_recall",
+    "ideal_precision",
+    "recall_gap_vs_ideal",
+    "precision_gap_vs_ideal",
+    "time",
+]
 
 
 def parse_args():
@@ -135,6 +159,90 @@ def count_csv_rows(path):
         return None
     with path.open(newline="") as handle:
         return sum(1 for _ in csv.DictReader(handle))
+
+
+def build_resume_path(output_path):
+    return output_path.parent / f"{output_path.name}.resume.pkl"
+
+
+def build_resume_temp_path(checkpoint_path):
+    return checkpoint_path.with_suffix(checkpoint_path.suffix + ".tmp")
+
+
+def build_results_frame():
+    return pd.DataFrame(columns=RESULT_COLUMNS)
+
+
+def has_remaining_budget(executed_query_count, number_query, skip_batches, effective_max_query):
+    return executed_query_count < skip_batches or number_query < effective_max_query
+
+
+def build_resume_config(args, lambda_w, synth_precision, output_path, max_query, effective_max_query):
+    return {
+        "dataset": args.dataset,
+        "batch_size": args.batch_size,
+        "alg_community": args.alg_community,
+        "lambda_w": lambda_w,
+        "mu_benefit": args.mu_benefit,
+        "optimal": args.optimal,
+        "synth_precision": synth_precision,
+        "oracle_backend": args.oracle_backend,
+        "openai_model": args.openai_model,
+        "prompt_mode": args.prompt_mode,
+        "max_llm_calls": args.max_llm_calls,
+        "skip_batches": args.skip_batches,
+        "output_path": str(output_path),
+        "max_query": max_query,
+        "effective_max_query": effective_max_query,
+    }
+
+
+def save_resume_state(checkpoint_path, resume_config, payload):
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = build_resume_temp_path(checkpoint_path)
+    blob = {
+        "resume_version": RESUME_VERSION,
+        "config": resume_config,
+        **payload,
+    }
+    with temp_path.open("wb") as handle:
+        pickle.dump(blob, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    temp_path.replace(checkpoint_path)
+
+
+def load_resume_state(checkpoint_path, resume_config):
+    source_path = checkpoint_path
+    if not source_path.exists():
+        temp_path = build_resume_temp_path(checkpoint_path)
+        if temp_path.exists():
+            source_path = temp_path
+        else:
+            return None
+
+    try:
+        with source_path.open("rb") as handle:
+            payload = pickle.load(handle)
+    except Exception as exc:  # noqa: BLE001
+        print(f"Ignoring unreadable resume checkpoint {source_path}: {exc}", flush=True)
+        return None
+
+    if payload.get("resume_version") != RESUME_VERSION:
+        print(f"Ignoring incompatible resume checkpoint {source_path}: version mismatch.", flush=True)
+        return None
+
+    if payload.get("config") != resume_config:
+        print(f"Ignoring incompatible resume checkpoint {source_path}: configuration mismatch.", flush=True)
+        return None
+
+    return payload
+
+
+def clear_resume_state(checkpoint_path):
+    if checkpoint_path.exists():
+        checkpoint_path.unlink()
+    temp_path = build_resume_temp_path(checkpoint_path)
+    if temp_path.exists():
+        temp_path.unlink()
 
 
 def determine_expected_calls(args, effective_max_query):
@@ -392,24 +500,57 @@ def main():
         args.alg_community = "False"
         lambda_w = "False"
         args.mu_benefit = "brmax"
-
-    perbacco = class_entity(
+    output_path = build_output_path(
         args.dataset,
-        graph,
-        df_ground_truth,
         args.batch_size,
         args.alg_community,
-        args.mu_benefit,
         lambda_w,
+        args.mu_benefit,
+        args.optimal,
+        synth_precision,
         oracle_backend=args.oracle_backend,
         openai_model=args.openai_model,
         prompt_mode=args.prompt_mode,
+        max_llm_calls=args.max_llm_calls if args.oracle_backend == "openai" else None,
+        skip_batches=args.skip_batches,
     )
+    resume_config = build_resume_config(
+        args,
+        lambda_w,
+        synth_precision,
+        output_path,
+        max_query,
+        effective_max_query,
+    )
+    checkpoint_path = build_resume_path(output_path)
+    resume_payload = load_resume_state(checkpoint_path, resume_config)
 
-    perbacco.create_list_community()
-    ideal_tracker = None
-    if args.oracle_backend == "openai":
-        ideal_tracker = class_entity(
+    if resume_payload is not None:
+        runtime = resume_payload["runtime"]
+        perbacco = resume_payload["perbacco"]
+        ideal_tracker = resume_payload["ideal_tracker"]
+        results = resume_payload["results"]
+        number_query = runtime["number_query"]
+        number_query_first_part = runtime["number_query_first_part"]
+        executed_query_count = runtime["executed_query_count"]
+        old_true_positive_pairs = runtime["old_true_positive_pairs"]
+        old_predicted_pairs = runtime["old_predicted_pairs"]
+        list_match_community_batch = list(runtime["list_match_community_batch"])
+        list_match_representative_batch = list(runtime["list_match_representative_batch"])
+        total_time = runtime["total_time"]
+        partial_time = runtime["partial_time"]
+        phase = runtime["phase"]
+        community_index = runtime["community_index"]
+        current = set(runtime["current"]) if runtime["current"] is not None else None
+        ran_second_part = runtime["ran_second_part"]
+        second_part_initialized = runtime.get("second_part_initialized", False)
+        print(
+            f"Resuming from checkpoint {checkpoint_path}: "
+            f"phase={phase} number_query={number_query} executed_queries={executed_query_count}",
+            flush=True,
+        )
+    else:
+        perbacco = class_entity(
             args.dataset,
             graph,
             df_ground_truth,
@@ -417,75 +558,102 @@ def main():
             args.alg_community,
             args.mu_benefit,
             lambda_w,
-            oracle_backend="groundtruth",
+            oracle_backend=args.oracle_backend,
             openai_model=args.openai_model,
             prompt_mode=args.prompt_mode,
         )
-    if args.oracle_backend == "openai":
-        print_llm_estimate(perbacco, args, effective_max_query)
 
-    results = pd.DataFrame(
-        columns=[
-            "number_query",
-            "kind",
-            "temperature",
-            "recall",
-            "precision",
-            "total_match",
-            "predicted_pairs",
-            "true_positive_pairs",
-            "len_df_benefit",
-            "progressive_recall",
-            "predicted_delta_pairs",
-            "progress_percent",
-            "llm_input_tokens",
-            "llm_output_tokens",
-            "llm_total_tokens",
-            "ideal_recall",
-            "ideal_precision",
-            "recall_gap_vs_ideal",
-            "precision_gap_vs_ideal",
-            "time",
-        ]
-    )
+        perbacco.create_list_community()
+        ideal_tracker = None
+        if args.oracle_backend == "openai":
+            ideal_tracker = class_entity(
+                args.dataset,
+                graph,
+                df_ground_truth,
+                args.batch_size,
+                args.alg_community,
+                args.mu_benefit,
+                lambda_w,
+                oracle_backend="groundtruth",
+                openai_model=args.openai_model,
+                prompt_mode=args.prompt_mode,
+            )
+            print_llm_estimate(perbacco, args, effective_max_query)
 
-    number_query = 0
-    executed_query_count = 0
-    old_true_positive_pairs = 0
-    old_predicted_pairs = 0
-    list_match_community_batch = []
-    list_match_representative_batch = []
-    perbacco.temperature = perbacco.batch_size
-    total_time = 0
-    partial_time = 0
-    nodes = set(perbacco.graph.nodes())
+        results = build_results_frame()
+        number_query = 0
+        number_query_first_part = 0
+        executed_query_count = 0
+        old_true_positive_pairs = 0
+        old_predicted_pairs = 0
+        list_match_community_batch = []
+        list_match_representative_batch = []
+        total_time = 0
+        partial_time = 0
+        phase = "last_query"
+        community_index = 0
+        current = None
+        ran_second_part = False
+        second_part_initialized = False
+        perbacco.temperature = perbacco.batch_size
+        nodes = set(perbacco.graph.nodes())
 
-    if len(perbacco.list_community) > 1:
-        print("WITH COMMUNITY, record ratio is:", perbacco.sum_heavy_comm / len(nodes), flush=True)
-        perbacco.with_community = "T"
-    else:
-        print("WO COMMUNITY", flush=True)
-        perbacco.list_community = [nodes]
-        perbacco.create_dict_comm()
-        perbacco.with_community = "F"
-    if ideal_tracker is not None:
-        ideal_tracker.list_community = [set(community) for community in perbacco.list_community]
-        ideal_tracker.create_dict_comm()
-        ideal_tracker.with_community = perbacco.with_community
+        if len(perbacco.list_community) > 1:
+            print("WITH COMMUNITY, record ratio is:", perbacco.sum_heavy_comm / len(nodes), flush=True)
+            perbacco.with_community = "T"
+            phase = "first_part"
+        else:
+            print("WO COMMUNITY", flush=True)
+            perbacco.list_community = [nodes]
+            perbacco.create_dict_comm()
+            perbacco.with_community = "F"
 
-    first_part = False
+        if ideal_tracker is not None:
+            ideal_tracker.list_community = [set(community) for community in perbacco.list_community]
+            ideal_tracker.create_dict_comm()
+            ideal_tracker.with_community = perbacco.with_community
 
-    if perbacco.with_community == "T":
-        first_part = True
-        for community_nodes in perbacco.list_community[:-1]:
-            if number_query >= effective_max_query and executed_query_count >= args.skip_batches:
-                break
+    def persist_resume_state():
+        save_resume_state(
+            checkpoint_path,
+            resume_config,
+            {
+                "perbacco": perbacco,
+                "ideal_tracker": ideal_tracker,
+                "results": results,
+                "runtime": {
+                    "phase": phase,
+                    "community_index": community_index,
+                    "current": sorted(current) if current is not None else None,
+                    "number_query": number_query,
+                    "number_query_first_part": number_query_first_part,
+                    "executed_query_count": executed_query_count,
+                    "old_true_positive_pairs": old_true_positive_pairs,
+                    "old_predicted_pairs": old_predicted_pairs,
+                    "list_match_community_batch": list_match_community_batch,
+                    "list_match_representative_batch": list_match_representative_batch,
+                    "total_time": total_time,
+                    "partial_time": partial_time,
+                    "ran_second_part": ran_second_part,
+                    "second_part_initialized": second_part_initialized,
+                },
+            },
+        )
 
-            run_query(perbacco, ideal_tracker, community_nodes, "skip")
-            current = set(community_nodes)
+    persist_resume_state()
 
-            while len(current) >= perbacco.batch_size and (
-                executed_query_count < args.skip_batches or number_query < effective_max_query
+    if phase == "first_part":
+        while community_index < len(perbacco.list_community) - 1 and has_remaining_budget(
+            executed_query_count, number_query, args.skip_batches, effective_max_query
+        ):
+            if current is None:
+                community_nodes = perbacco.list_community[community_index]
+                run_query(perbacco, ideal_tracker, community_nodes, "skip")
+                current = set(community_nodes)
+                persist_resume_state()
+
+            while len(current) >= perbacco.batch_size and has_remaining_budget(
+                executed_query_count, number_query, args.skip_batches, effective_max_query
             ):
                 subgraph = perbacco.graph.subgraph(current).copy()
                 vertex_weight_sum = {
@@ -533,10 +701,11 @@ def main():
                     list_match_community_batch.append(delta_predicted_pairs)
                 old_true_positive_pairs = metrics["true_positive_pairs"]
                 old_predicted_pairs = metrics["predicted_pairs"]
+                persist_resume_state()
 
                 set_higher_temperature = perbacco.compute_entity_higher_temperature()
-                while len(set_higher_temperature) == perbacco.batch_size and (
-                    executed_query_count < args.skip_batches or number_query < effective_max_query
+                while len(set_higher_temperature) == perbacco.batch_size and has_remaining_budget(
+                    executed_query_count, number_query, args.skip_batches, effective_max_query
                 ):
                     current = current.difference(set(set_higher_temperature))
                     executed_query_count += 1
@@ -586,31 +755,51 @@ def main():
                     set_higher_temperature = perbacco.compute_entity_higher_temperature()
                     old_true_positive_pairs = metrics["true_positive_pairs"]
                     old_predicted_pairs = metrics["predicted_pairs"]
+                    persist_resume_state()
 
                 perbacco.temperature *= 1 - 1 / perbacco.batch_size
+                persist_resume_state()
 
-    number_query_first_part = number_query
+            if current is not None and len(current) < perbacco.batch_size:
+                current = None
+                community_index += 1
+                persist_resume_state()
 
-    if executed_query_count < args.skip_batches or number_query < effective_max_query:
-        all_nodes = list(perbacco.list_community[-1])
-        run_query(perbacco, ideal_tracker, all_nodes, "last")
+        number_query_first_part = number_query
+        phase = "last_query"
+        current = None
+        persist_resume_state()
 
-    perbacco.temperature = 0
-    second_part = False
-    random.seed(42)
-    perbacco.df_benefit = perbacco.df_benefit.sort_values(by="benefit", ascending=False, ignore_index=False)
-    if ideal_tracker is not None:
-        ideal_tracker.df_benefit = ideal_tracker.df_benefit.sort_values(by="benefit", ascending=False, ignore_index=False)
+    if phase == "last_query":
+        if has_remaining_budget(executed_query_count, number_query, args.skip_batches, effective_max_query):
+            all_nodes = list(perbacco.list_community[-1])
+            run_query(perbacco, ideal_tracker, all_nodes, "last")
+            persist_resume_state()
+        phase = "second_part"
+        persist_resume_state()
 
-    while len(perbacco.df_benefit) > 0 and (
-        executed_query_count < args.skip_batches or number_query < effective_max_query
+    if phase == "second_part" and not second_part_initialized:
+        perbacco.temperature = 0
+        random.seed(42)
+        perbacco.df_benefit = perbacco.df_benefit.sort_values(by="benefit", ascending=False, ignore_index=False)
+        if ideal_tracker is not None:
+            ideal_tracker.df_benefit = ideal_tracker.df_benefit.sort_values(
+                by="benefit",
+                ascending=False,
+                ignore_index=False,
+            )
+        second_part_initialized = True
+        persist_resume_state()
+
+    while phase == "second_part" and len(perbacco.df_benefit) > 0 and has_remaining_budget(
+        executed_query_count, number_query, args.skip_batches, effective_max_query
     ):
         executed_query_count += 1
         batch = perbacco.compute_entity_higher_temperature()
         is_warmup = executed_query_count <= args.skip_batches
         time_query = None
         if not is_warmup:
-            second_part = True
+            ran_second_part = True
             number_query += 1
             query_timer_start = time.perf_counter()
         run_query(perbacco, ideal_tracker, batch, "entity", use_groundtruth=is_warmup)
@@ -639,27 +828,22 @@ def main():
             list_match_community_batch.append(delta_predicted_pairs)
         old_true_positive_pairs = metrics["true_positive_pairs"]
         old_predicted_pairs = metrics["predicted_pairs"]
+        persist_resume_state()
 
-    write_time_summary(args, perbacco, total_time, number_query, number_query_first_part, partial_time, second_part)
+    write_time_summary(
+        args,
+        perbacco,
+        total_time,
+        number_query,
+        number_query_first_part,
+        partial_time,
+        ran_second_part,
+    )
 
     save_auxiliary_lists(args, perbacco)
-
-    output_path = build_output_path(
-        args.dataset,
-        args.batch_size,
-        args.alg_community,
-        lambda_w,
-        args.mu_benefit,
-        args.optimal,
-        synth_precision,
-        oracle_backend=args.oracle_backend,
-        openai_model=args.openai_model,
-        prompt_mode=args.prompt_mode,
-        max_llm_calls=args.max_llm_calls if args.oracle_backend == "openai" else None,
-        skip_batches=args.skip_batches,
-    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     results.to_csv(output_path, index=False)
+    clear_resume_state(checkpoint_path)
     if args.skip_batches > 0 and executed_query_count <= args.skip_batches:
         print("Warmup consumed all available batches; no evaluated rows were recorded.", flush=True)
     if len(results) > 0 and ideal_tracker is not None:

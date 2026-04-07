@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import math
+import random
 import statistics
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -408,6 +410,8 @@ class OpenAIEntityOracle:
         self.timeout_seconds = timeout_seconds or llm_config.OPENAI_TIMEOUT_SECONDS
         self.max_retries = max_retries or llm_config.OPENAI_MAX_RETRIES
         self.max_output_tokens = max_output_tokens or llm_config.OPENAI_MAX_OUTPUT_TOKENS
+        self.retry_base_seconds = llm_config.OPENAI_RETRY_BASE_SECONDS
+        self.retry_max_seconds = llm_config.OPENAI_RETRY_MAX_SECONDS
         self.reasoning_effort = reasoning_effort or llm_config.OPENAI_REASONING_EFFORT
         self.base_url = (base_url or llm_config.OPENAI_BASE_URL).rstrip("/")
 
@@ -450,6 +454,27 @@ class OpenAIEntityOracle:
         payload["max_output_tokens"] = max_output_tokens
         return payload
 
+    def _estimate_initial_output_limit(self, entities: list[dict[str, Any]], model: str | None = None) -> int:
+        resolved_model = model or self.model
+        entity_count = max(1, len(entities))
+
+        # Worst case, every entity is a singleton cluster. Budget both the visible
+        # JSON and extra headroom for reasoning-capable models, where reasoning
+        # tokens can consume the same output budget.
+        singleton_json = {
+            "clusters": [
+                {
+                    "cluster_id": f"c{index + 1}",
+                    "entity_ids": [str(entity.get("entity_id", index + 1))],
+                }
+                for index, entity in enumerate(entities)
+            ]
+        }
+        visible_output_tokens = _estimate_tokens_from_text(json.dumps(singleton_json, ensure_ascii=True))
+        reasoning_buffer = max(256, 64 * entity_count) if self._supports_reasoning_effort(resolved_model) else 128
+
+        return max(self.max_output_tokens, visible_output_tokens + reasoning_buffer)
+
     def _request_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError(
@@ -477,6 +502,11 @@ class OpenAIEntityOracle:
             raise RuntimeError(f"OpenAI API request failed: {exc.reason}") from exc
 
         return json.loads(response_body)
+
+    def _compute_retry_delay(self, attempt: int) -> float:
+        base_delay = self.retry_base_seconds * (2 ** max(0, attempt - 1))
+        jitter = random.uniform(0.75, 1.25)
+        return min(self.retry_max_seconds, base_delay * jitter)
 
     def _validate_clusters(
         self,
@@ -519,10 +549,11 @@ class OpenAIEntityOracle:
             for record in entity.get("records", []):
                 alias_map[str(record.get("id"))] = canonical_id
         last_error: Exception | None = None
+        initial_output_limit = self._estimate_initial_output_limit(entities)
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                output_limit = self.max_output_tokens * attempt
+                output_limit = initial_output_limit * (2 ** (attempt - 1))
                 response_payload = self._request_json(
                     "/responses",
                     self._build_response_payload_with_limit(prompt, max_output_tokens=output_limit),
@@ -540,14 +571,18 @@ class OpenAIEntityOracle:
                     "response_id": response_payload.get("id", ""),
                 }
             except Exception as exc:  # noqa: BLE001
-                last_error = exc
+                last_error = RuntimeError(
+                    f"{exc} (attempt={attempt}/{self.max_retries}, max_output_tokens={output_limit})"
+                )
+                if attempt < self.max_retries:
+                    time.sleep(self._compute_retry_delay(attempt))
 
         raise RuntimeError(f"OpenAI entity resolution failed after {self.max_retries} attempts: {last_error}")
 
     def estimate_batch_tokens(self, entities: list[dict[str, Any]]) -> dict[str, Any]:
         prompt = self.build_prompt(entities)
         heuristic_input = _estimate_tokens_from_text(prompt)
-        heuristic_output = max(80, 16 * len(entities))
+        heuristic_output = self._estimate_initial_output_limit(entities)
 
         estimate = {
             "source": "heuristic",
