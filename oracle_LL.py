@@ -38,7 +38,7 @@ OUTPUT_SCHEMA = {
     "required": ["clusters"],
 }
 
-ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy bibliographic citations.
+BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy bibliographic citations.
 
 Goal:
 - Partition the input entities by exact real-world paper identity.
@@ -56,6 +56,54 @@ How to decide:
 - Same venue and same year do not imply a match if normalized titles differ materially.
 - Do not merge based only on topic similarity, venue overlap, author overlap, or same year.
 - If evidence is mixed or incomplete, choose the safer option and keep the entities separate.
+
+Critical output constraints:
+- Use only the provided input entity ids in `entity_ids`.
+- Never output member record ids, invented ids, or text explanations.
+- Return valid JSON only, matching the exact schema.
+"""
+
+GENERIC_TABULAR_ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy tabular records.
+
+Goal:
+- Partition the input entities by exact real-world entity identity.
+- Two entities match only if they refer to the same specific real-world entity, not merely related entities.
+- Every input entity must appear exactly once in the output, including singleton clusters.
+
+How to decide:
+- Compare all available non-empty fields jointly.
+- Treat spelling variation, abbreviations, formatting changes, punctuation differences, reordered tokens, and missing fields as normal data noise.
+- Strong positive evidence usually requires agreement on the most identifying fields plus compatibility on supporting fields.
+- Numeric fields such as year, price, amount, age, or model numbers are useful evidence, but do not merge records based on a single shared numeric field alone.
+- Address-like, organization-like, person-name-like, and product-title-like fields can each be strong identifiers when multiple parts align.
+- If an entity already has `entity_size > 1`, treat its record list as accumulated evidence from previously merged records.
+- Strong negative evidence includes conflicting names/titles, incompatible identifiers, incompatible addresses, incompatible years when the record otherwise looks specific, or different organizations/products/people with only broad similarity.
+- Do not merge based only on topic similarity, a shared category, one overlapping token, or one shared field.
+- If evidence is mixed or incomplete, choose the safer option and keep the entities separate.
+
+Critical output constraints:
+- Use only the provided input entity ids in `entity_ids`.
+- Never output member record ids, invented ids, or text explanations.
+- Return valid JSON only, matching the exact schema.
+"""
+
+PRODUCT_CATALOG_ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy product catalog records.
+
+Goal:
+- Partition the input entities by exact real-world product identity.
+- Two entities match only if they refer to the same specific product model or SKU family, not merely related products from the same brand.
+- Every input entity must appear exactly once in the output, including singleton clusters.
+
+How to decide:
+- Compare all available non-empty fields jointly, especially brand, model, title, description, and structured specs.
+- If brand matches and model identifiers are identical or nearly identical after normalizing punctuation and spacing, prefer merging even when some specs are missing.
+- Treat marketplace boilerplate, offer text, condition words, color words, and site-specific wording as weak evidence.
+- Titles and descriptions may differ in length and formatting; prefer merging when they point to the same product line and the key structured specs are compatible.
+- Missing price, missing specs, or different offered prices should not block a merge by themselves.
+- If helper fields such as `brand_normalized`, `model_normalized`, `title_tokens`, `description_tokens`, or `numeric_signatures` align strongly, that is meaningful positive evidence.
+- Strong negative evidence includes conflicting model identifiers, incompatible core specs, different brands when the model is otherwise specific, or descriptions clearly referring to different product families.
+- Do not merge based only on a shared brand, generic category, one overlapping token, or one shared numeric value.
+- If evidence is mixed, keep precision high by separating records unless brand/model/title evidence is strongly compatible.
 
 Critical output constraints:
 - Use only the provided input entity ids in `entity_ids`.
@@ -265,6 +313,8 @@ FEW_SHOT_EXAMPLES = [
     ),
 ]
 
+ZERO_SHOT_INSTRUCTIONS = BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS
+
 
 def _sanitize_record(record: dict[str, Any]) -> dict[str, str]:
     sanitized = {}
@@ -281,7 +331,53 @@ def _serialize_entities(entities: list[dict[str, Any]]) -> str:
     return json.dumps(entities, indent=2, ensure_ascii=True)
 
 
-def build_zero_shot_prompt(entities: list[dict[str, Any]]) -> str:
+def _build_context_section(dataset_name: str | None = None, field_names: list[str] | None = None) -> list[str]:
+    sections = []
+    if dataset_name:
+        sections.append(f"Dataset: {dataset_name}")
+    if field_names:
+        sections.append("Available fields: " + ", ".join(str(name) for name in field_names))
+    return sections
+
+
+def build_zero_shot_prompt(
+    entities: list[dict[str, Any]],
+    *,
+    dataset_name: str | None = None,
+    field_names: list[str] | None = None,
+) -> str:
+    sections = _build_context_section(dataset_name=dataset_name, field_names=field_names)
+    sections.extend(
+        [
+            "Input entities:",
+            _serialize_entities(entities),
+            "Return the partition now.",
+        ]
+    )
+    return "\n\n".join(sections)
+
+
+def build_few_shot_prompt(
+    entities: list[dict[str, Any]],
+    *,
+    instructions: str,
+    examples: list[dict[str, Any]],
+    dataset_name: str | None = None,
+    field_names: list[str] | None = None,
+) -> str:
+    sections = [instructions.strip()]
+    sections.extend(_build_context_section(dataset_name=dataset_name, field_names=field_names))
+    for example in examples:
+        sections.append(f"{example['name']} input:")
+        sections.append(_serialize_entities(example["entities"]))
+        sections.append(f"{example['name']} output:")
+        sections.append(json.dumps(example["answer"], indent=2, ensure_ascii=True))
+    sections.append("Input entities:")
+    sections.append(_serialize_entities(entities))
+    return "\n\n".join(sections)
+
+
+def build_bibliographic_zero_shot_prompt(entities: list[dict[str, Any]]) -> str:
     return "\n\n".join(
         [
             "Input entities:",
@@ -291,16 +387,12 @@ def build_zero_shot_prompt(entities: list[dict[str, Any]]) -> str:
     )
 
 
-def build_few_shot_prompt(entities: list[dict[str, Any]]) -> str:
-    sections = [ZERO_SHOT_INSTRUCTIONS.strip()]
-    for example in FEW_SHOT_EXAMPLES:
-        sections.append(f"{example['name']} input:")
-        sections.append(_serialize_entities(example["entities"]))
-        sections.append(f"{example['name']} output:")
-        sections.append(json.dumps(example["answer"], indent=2, ensure_ascii=True))
-    sections.append("Input entities:")
-    sections.append(_serialize_entities(entities))
-    return "\n\n".join(sections)
+def build_bibliographic_few_shot_prompt(entities: list[dict[str, Any]]) -> str:
+    return build_few_shot_prompt(
+        entities,
+        instructions=BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS,
+        examples=FEW_SHOT_EXAMPLES,
+    )
 
 
 def clusters_to_pairwise_matches(clusters: list[dict[str, Any]]) -> set[frozenset[str]]:
@@ -414,18 +506,68 @@ class OpenAIEntityOracle:
     def _supports_reasoning_effort(self, model: str) -> bool:
         return model.startswith("gpt-5")
 
-    def build_prompt(self, entities: list[dict[str, Any]], prompt_mode: str | None = None) -> str:
-        chosen_mode = llm_config.resolve_prompt_mode(prompt_mode or self.prompt_mode)
-        if chosen_mode == "few-shot":
-            return build_few_shot_prompt(entities)
-        return build_zero_shot_prompt(entities)
+    def _resolve_prompt_profile(self, prompt_profile: str | None = None) -> str:
+        chosen = (prompt_profile or "bibliographic").strip() or "bibliographic"
+        if chosen not in {"bibliographic", "generic_tabular", "product_catalog"}:
+            raise ValueError(f"Unsupported prompt profile: {chosen}")
+        return chosen
 
-    def _build_response_payload(self, prompt: str, model: str | None = None) -> dict[str, Any]:
+    def _instructions_for_profile(self, prompt_profile: str) -> str:
+        if prompt_profile == "product_catalog":
+            return PRODUCT_CATALOG_ZERO_SHOT_INSTRUCTIONS
+        if prompt_profile == "generic_tabular":
+            return GENERIC_TABULAR_ZERO_SHOT_INSTRUCTIONS
+        return BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS
+
+    def _default_examples_for_profile(self, prompt_profile: str) -> list[dict[str, Any]]:
+        if prompt_profile in {"generic_tabular", "product_catalog"}:
+            return []
+        return FEW_SHOT_EXAMPLES
+
+    def build_prompt(
+        self,
+        entities: list[dict[str, Any]],
+        prompt_mode: str | None = None,
+        *,
+        prompt_profile: str | None = None,
+        dataset_name: str | None = None,
+        field_names: list[str] | None = None,
+        few_shot_examples: list[dict[str, Any]] | None = None,
+    ) -> str:
+        chosen_mode = llm_config.resolve_prompt_mode(prompt_mode or self.prompt_mode)
+        resolved_profile = self._resolve_prompt_profile(prompt_profile)
+        instructions = self._instructions_for_profile(resolved_profile)
+        examples = (
+            self._default_examples_for_profile(resolved_profile)
+            if few_shot_examples is None
+            else few_shot_examples
+        )
+        if chosen_mode == "few-shot":
+            return build_few_shot_prompt(
+                entities,
+                instructions=instructions,
+                examples=examples,
+                dataset_name=dataset_name,
+                field_names=field_names,
+            )
+        return build_zero_shot_prompt(
+            entities,
+            dataset_name=dataset_name,
+            field_names=field_names,
+        )
+
+    def _build_response_payload(
+        self,
+        prompt: str,
+        model: str | None = None,
+        *,
+        instructions: str | None = None,
+    ) -> dict[str, Any]:
         resolved_model = model or self.model
         payload = {
             "model": resolved_model,
             "input": prompt,
-            "instructions": ZERO_SHOT_INSTRUCTIONS.strip(),
+            "instructions": (instructions or BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS).strip(),
             "max_output_tokens": self.max_output_tokens,
             "text": {
                 "format": {
@@ -445,8 +587,10 @@ class OpenAIEntityOracle:
         prompt: str,
         max_output_tokens: int,
         model: str | None = None,
+        *,
+        instructions: str | None = None,
     ) -> dict[str, Any]:
-        payload = self._build_response_payload(prompt, model=model)
+        payload = self._build_response_payload(prompt, model=model, instructions=instructions)
         payload["max_output_tokens"] = max_output_tokens
         return payload
 
@@ -509,8 +653,26 @@ class OpenAIEntityOracle:
 
         return normalized
 
-    def resolve_batch(self, entities: list[dict[str, Any]]) -> dict[str, Any]:
-        prompt = self.build_prompt(entities)
+    def resolve_batch(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        prompt_profile: str | None = None,
+        dataset_name: str | None = None,
+        field_names: list[str] | None = None,
+        few_shot_examples: list[dict[str, Any]] | None = None,
+        prompt_mode: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_profile = self._resolve_prompt_profile(prompt_profile)
+        instructions = self._instructions_for_profile(resolved_profile)
+        prompt = self.build_prompt(
+            entities,
+            prompt_mode=prompt_mode,
+            prompt_profile=resolved_profile,
+            dataset_name=dataset_name,
+            field_names=field_names,
+            few_shot_examples=few_shot_examples,
+        )
         expected_ids = {str(entity["entity_id"]) for entity in entities}
         alias_map = {}
         for entity in entities:
@@ -525,7 +687,11 @@ class OpenAIEntityOracle:
                 output_limit = self.max_output_tokens * attempt
                 response_payload = self._request_json(
                     "/responses",
-                    self._build_response_payload_with_limit(prompt, max_output_tokens=output_limit),
+                    self._build_response_payload_with_limit(
+                        prompt,
+                        max_output_tokens=output_limit,
+                        instructions=instructions,
+                    ),
                 )
                 output_text = _extract_output_text(response_payload)
                 try:
@@ -544,8 +710,26 @@ class OpenAIEntityOracle:
 
         raise RuntimeError(f"OpenAI entity resolution failed after {self.max_retries} attempts: {last_error}")
 
-    def estimate_batch_tokens(self, entities: list[dict[str, Any]]) -> dict[str, Any]:
-        prompt = self.build_prompt(entities)
+    def estimate_batch_tokens(
+        self,
+        entities: list[dict[str, Any]],
+        *,
+        prompt_profile: str | None = None,
+        dataset_name: str | None = None,
+        field_names: list[str] | None = None,
+        few_shot_examples: list[dict[str, Any]] | None = None,
+        prompt_mode: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_profile = self._resolve_prompt_profile(prompt_profile)
+        instructions = self._instructions_for_profile(resolved_profile)
+        prompt = self.build_prompt(
+            entities,
+            prompt_mode=prompt_mode,
+            prompt_profile=resolved_profile,
+            dataset_name=dataset_name,
+            field_names=field_names,
+            few_shot_examples=few_shot_examples,
+        )
         heuristic_input = _estimate_tokens_from_text(prompt)
         heuristic_output = max(80, 16 * len(entities))
 
@@ -563,7 +747,7 @@ class OpenAIEntityOracle:
         try:
             response_payload = self._request_json(
                 "/responses/input_tokens",
-                self._build_response_payload(prompt),
+                self._build_response_payload(prompt, instructions=instructions),
             )
         except RuntimeError:
             return estimate
