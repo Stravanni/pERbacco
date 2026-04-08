@@ -4,6 +4,7 @@ import itertools
 import json
 import random
 import re
+import csv
 from argparse import ArgumentParser
 from collections import defaultdict
 from pathlib import Path
@@ -68,6 +69,10 @@ def default_results_path(args) -> Path:
     if "synth" in args.dataset:
         parts.append(f"synth{args.synth_precision}")
     return directory / f"{','.join(parts)}.json"
+
+
+def summary_csv_path(results_path: Path) -> Path:
+    return results_path.with_suffix(".csv")
 
 
 def load_dataset_records(dataset_name: str) -> tuple[dict[int | str, dict[str, str]], list[str]]:
@@ -167,6 +172,21 @@ def infer_prompt_profile(dataset_name, field_names):
     if {"brand", "model"} <= field_set or {"brand", "title", "description"} <= field_set:
         return "product_catalog"
     return "generic_tabular"
+
+
+def to_json_compatible(value):
+    if isinstance(value, dict):
+        return {str(key): to_json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [to_json_compatible(item) for item in value]
+    if isinstance(value, set):
+        return [to_json_compatible(item) for item in sorted(value, key=lambda item: str(item))]
+    if hasattr(value, "item") and callable(value.item):
+        try:
+            return to_json_compatible(value.item())
+        except (TypeError, ValueError):
+            pass
+    return value
 
 
 def build_generic_entity_payload(record_id, records_by_id, prompt_profile):
@@ -528,14 +548,76 @@ def main():
         "batches": batch_results,
     }
 
-    results_path.write_text(json.dumps(artifact, indent=2, ensure_ascii=True) + "\n")
+    results_path.write_text(json.dumps(to_json_compatible(artifact), indent=2, ensure_ascii=True) + "\n")
+
+    csv_path = summary_csv_path(results_path)
+    with csv_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle,
+            fieldnames=[
+                "dataset",
+                "batch_size",
+                "num_batches",
+                "seed",
+                "prompt_mode",
+                "few_shot_pairs_per_class",
+                "openai_model",
+                "prompt_profile",
+                "synth_precision",
+                "connected_components",
+                "graph_nodes",
+                "graph_edges",
+                "queried_pair_events",
+                "gt_duplicate_pairs",
+                "correctly_identified_duplicate_pairs",
+                "predicted_positive_pairs",
+                "precision",
+                "recall",
+                "f1",
+                "llm_input_tokens",
+                "llm_output_tokens",
+                "llm_total_tokens",
+                "json_results_path",
+            ],
+        )
+        writer.writeheader()
+        writer.writerow(
+            {
+                "dataset": args.dataset,
+                "batch_size": args.batch_size,
+                "num_batches": args.num_batches,
+                "seed": args.seed,
+                "prompt_mode": args.prompt_mode,
+                "few_shot_pairs_per_class": args.few_shot_pairs_per_class,
+                "openai_model": oracle.model,
+                "prompt_profile": prompt_profile,
+                "synth_precision": args.synth_precision,
+                "connected_components": len(components),
+                "graph_nodes": len(graph.nodes()),
+                "graph_edges": len(graph.edges()),
+                "queried_pair_events": aggregate["queried_pair_events"],
+                "gt_duplicate_pairs": aggregate["actual_positive_pairs"],
+                "correctly_identified_duplicate_pairs": aggregate["tp"],
+                "predicted_positive_pairs": aggregate["predicted_positive_pairs"],
+                "precision": aggregate["precision"],
+                "recall": aggregate["recall"],
+                "f1": aggregate["f1"],
+                "llm_input_tokens": total_usage["llm_input_tokens"],
+                "llm_output_tokens": total_usage["llm_output_tokens"],
+                "llm_total_tokens": total_usage["llm_total_tokens"],
+                "json_results_path": str(results_path),
+            }
+        )
 
     print(
-        f"final: precision={aggregate['precision']:.4f} "
+        f"final: gt_duplicate_pairs={aggregate['actual_positive_pairs']} "
+        f"correctly_identified_duplicate_pairs={aggregate['tp']} "
+        f"precision={aggregate['precision']:.4f} "
         f"recall={aggregate['recall']:.4f} "
         f"f1={aggregate['f1']:.4f} "
         f"queried_pair_events={aggregate['queried_pair_events']} "
-        f"results={results_path}",
+        f"results={results_path} "
+        f"csv={csv_path}",
         flush=True,
     )
 
