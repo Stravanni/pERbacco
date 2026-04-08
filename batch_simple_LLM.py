@@ -502,17 +502,22 @@ def main():
                 "few_shot_example_count": len(few_shot_examples),
                 "response_id": response.get("response_id", ""),
                 "usage": response["usage"],
+                "validation": response.get("validation", {"repaired": False}),
                 "clusters": response["clusters"],
                 "metrics": metrics,
             }
         )
 
+        repair_suffix = ""
+        if response.get("validation", {}).get("repaired"):
+            repair_suffix = " repaired=1"
         print(
             f"batch {batch_index + 1}/{args.num_batches}: "
             f"precision={metrics['precision']:.4f} "
             f"recall={metrics['recall']:.4f} "
             f"f1={metrics['f1']:.4f} "
-            f"tokens={response['usage']['llm_total_tokens']}",
+            f"tokens={response['usage']['llm_total_tokens']}"
+            f"{repair_suffix}",
             flush=True,
         )
 
@@ -545,6 +550,11 @@ def main():
         },
         "aggregate_metrics": aggregate,
         "aggregate_usage": total_usage,
+        "aggregate_validation": {
+            "repaired_batches": sum(
+                1 for item in batch_results if item.get("validation", {}).get("repaired")
+            )
+        },
         "batches": batch_results,
     }
 

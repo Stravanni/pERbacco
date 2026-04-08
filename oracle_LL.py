@@ -457,6 +457,10 @@ def _extract_usage(response_payload: dict[str, Any]) -> dict[str, int]:
     }
 
 
+def _canonicalize_entity_ids(entity_ids: list[Any], alias_map: dict[str, str]) -> list[str]:
+    return [alias_map.get(str(entity_id), str(entity_id)) for entity_id in entity_ids]
+
+
 def _normalize_clusters(clusters: list[dict[str, Any]]) -> list[dict[str, Any]]:
     normalized = []
     for cluster in clusters:
@@ -632,13 +636,11 @@ class OpenAIEntityOracle:
         seen_ids: set[str] = set()
         alias_map = alias_map or {}
         for cluster in normalized:
-            canonical_ids = []
-            for entity_id in cluster["entity_ids"]:
-                canonical_ids.append(alias_map.get(entity_id, entity_id))
-            cluster["entity_ids"] = sorted(set(canonical_ids))
-            cluster_ids = set(cluster["entity_ids"])
-            if len(cluster_ids) != len(cluster["entity_ids"]):
+            canonical_ids = _canonicalize_entity_ids(cluster["entity_ids"], alias_map)
+            if len(set(canonical_ids)) != len(canonical_ids):
                 raise RuntimeError(f"Duplicate entity id inside cluster: {cluster}")
+            cluster["entity_ids"] = sorted(canonical_ids)
+            cluster_ids = set(cluster["entity_ids"])
             overlap = seen_ids & cluster_ids
             if overlap:
                 raise RuntimeError(f"Entity ids repeated across clusters: {sorted(overlap)}")
@@ -652,6 +654,66 @@ class OpenAIEntityOracle:
             )
 
         return normalized
+
+    def _repair_clusters(
+        self,
+        raw_clusters: list[dict[str, Any]],
+        expected_ids: set[str],
+        alias_map: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        alias_map = alias_map or {}
+        repaired_clusters: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        duplicate_within_cluster: set[str] = set()
+        duplicate_across_clusters: set[str] = set()
+        unexpected_ids: set[str] = set()
+
+        for cluster in raw_clusters:
+            kept_ids: list[str] = []
+            local_seen: set[str] = set()
+            for raw_entity_id in cluster["entity_ids"]:
+                raw_text = str(raw_entity_id)
+                canonical_id = alias_map.get(raw_text, raw_text)
+                if canonical_id not in expected_ids:
+                    unexpected_ids.add(raw_text)
+                    continue
+                if canonical_id in local_seen:
+                    duplicate_within_cluster.add(canonical_id)
+                    continue
+                if canonical_id in seen_ids:
+                    duplicate_across_clusters.add(canonical_id)
+                    continue
+                local_seen.add(canonical_id)
+                seen_ids.add(canonical_id)
+                kept_ids.append(canonical_id)
+
+            if kept_ids:
+                repaired_clusters.append(
+                    {
+                        "cluster_id": f"c{len(repaired_clusters) + 1}",
+                        "entity_ids": sorted(kept_ids),
+                    }
+                )
+
+        missing_ids = sorted(expected_ids - seen_ids)
+        for entity_id in missing_ids:
+            repaired_clusters.append(
+                {
+                    "cluster_id": f"c{len(repaired_clusters) + 1}",
+                    "entity_ids": [entity_id],
+                }
+            )
+
+        repair_applied = bool(
+            duplicate_within_cluster or duplicate_across_clusters or unexpected_ids or missing_ids
+        )
+        return _normalize_clusters(repaired_clusters), {
+            "repaired": repair_applied,
+            "duplicate_within_cluster": sorted(duplicate_within_cluster),
+            "duplicate_across_clusters": sorted(duplicate_across_clusters),
+            "unexpected_ids": sorted(unexpected_ids),
+            "missing_ids": missing_ids,
+        }
 
     def resolve_batch(
         self,
@@ -681,10 +743,11 @@ class OpenAIEntityOracle:
             for record in entity.get("records", []):
                 alias_map[str(record.get("id"))] = canonical_id
         last_error: Exception | None = None
+        base_output_limit = max(self.max_output_tokens, 64 * len(entities))
 
         for attempt in range(1, self.max_retries + 1):
             try:
-                output_limit = self.max_output_tokens * attempt
+                output_limit = base_output_limit * attempt
                 response_payload = self._request_json(
                     "/responses",
                     self._build_response_payload_with_limit(
@@ -698,12 +761,30 @@ class OpenAIEntityOracle:
                     parsed = json.loads(output_text)
                 except json.JSONDecodeError:
                     parsed = json.loads(_extract_balanced_json(output_text))
-                clusters = self._validate_clusters(parsed["clusters"], expected_ids, alias_map=alias_map)
+                validation = {
+                    "repaired": False,
+                    "duplicate_within_cluster": [],
+                    "duplicate_across_clusters": [],
+                    "unexpected_ids": [],
+                    "missing_ids": [],
+                }
+                try:
+                    clusters = self._validate_clusters(parsed["clusters"], expected_ids, alias_map=alias_map)
+                except RuntimeError as validation_error:
+                    clusters, validation = self._repair_clusters(
+                        parsed["clusters"],
+                        expected_ids,
+                        alias_map=alias_map,
+                    )
+                    if not validation["repaired"]:
+                        raise validation_error
+                    validation["repair_reason"] = str(validation_error)
                 usage = _extract_usage(response_payload)
                 return {
                     "clusters": clusters,
                     "usage": usage,
                     "response_id": response_payload.get("id", ""),
+                    "validation": validation,
                 }
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
