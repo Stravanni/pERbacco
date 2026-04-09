@@ -45,6 +45,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--prompt-mode", type=str, choices=["zero-shot", "few-shot"], default="few-shot")
     parser.add_argument("--few-shot-pairs-per-class", type=int, default=3)
+    parser.add_argument(
+        "--prompt-profile",
+        type=str,
+        choices=["bibliographic", "generic_tabular", "product_catalog", "camera_catalog", "funding_award"],
+        default=None,
+    )
     parser.add_argument("--openai-model", type=str, default=None)
     parser.add_argument("--synth_precision", type=str, default="False")
     parser.add_argument("--results-path", type=str, default=None)
@@ -165,6 +171,337 @@ def numeric_signature(text):
     return re.findall(r"\d+(?:\.\d+)?", str(text or ""))[:6]
 
 
+MARKETPLACE_NOISE_PATTERNS = [
+    r"\bbest price in india\b",
+    r"\bspecs? and review\b",
+    r"\bprice[\s-]?hunt\b",
+    r"\bvalid in\b",
+    r"\bebay\b",
+    r"\bamazon\b",
+    r"\bflipkart\b",
+    r"\bbuy now\b",
+    r"\bshopping\b",
+    r"\bfor sale\b",
+]
+CAMERA_SPEC_FIELDS = ("mp", "optical_zoom", "digital_zoom", "screen_size", "type")
+FUNDING_COARSE_LOCATION_TOKENS = {
+    "bronx",
+    "brooklyn",
+    "manhattan",
+    "queens",
+    "staten",
+    "island",
+    "new",
+    "york",
+    "ny",
+}
+
+
+def strip_marketplace_boilerplate(text):
+    lowered = str(text or "").lower()
+    parts = []
+    for piece in re.split(r"[|]", lowered):
+        cleaned = piece
+        for pattern in MARKETPLACE_NOISE_PATTERNS:
+            cleaned = re.sub(pattern, " ", cleaned)
+        cleaned = re.sub(r"\b(?:delhi|mumbai|bangalore|hyderabad|chennai|kolkata|ahmedabad|surat)\b", " ", cleaned)
+        cleaned = re.sub(r"\b\d{4}\b", " ", cleaned)
+        cleaned = re.sub(r"[^a-z0-9]+", " ", cleaned)
+        cleaned = " ".join(cleaned.split())
+        if cleaned:
+            parts.append(cleaned)
+    return " ".join(parts)
+
+
+def normalized_nonempty(value):
+    normalized = normalize_text(value)
+    return normalized if normalized else ""
+
+
+def record_without_id(record):
+    return {
+        key: value
+        for key, value in record.items()
+        if key != "id" and str(value).strip()
+    }
+
+
+def camera_brand_model_signature(sanitized_record):
+    brand = normalized_nonempty(sanitized_record.get("brand", ""))
+    model = normalized_nonempty(sanitized_record.get("model", ""))
+    if brand and model:
+        return f"{brand}::{model}"
+    return brand or model
+
+
+def camera_spec_signatures(sanitized_record):
+    signatures = {}
+    for field_name in CAMERA_SPEC_FIELDS:
+        value = normalized_nonempty(sanitized_record.get(field_name, ""))
+        if value:
+            signatures[field_name] = value
+    return signatures
+
+
+def normalize_amount_signature(value):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        numeric_value = float(text)
+    except ValueError:
+        return normalized_nonempty(text)
+    if numeric_value.is_integer():
+        return str(int(numeric_value))
+    return f"{numeric_value:.2f}".rstrip("0").rstrip(".")
+
+
+def funding_address_core(address):
+    normalized = normalized_nonempty(address)
+    if not normalized:
+        return ""
+    normalized = re.sub(r"\b\d{5}(?: \d{4})?\b", " ", normalized)
+    normalized = re.sub(r"\bny\b", " ", normalized)
+    normalized = " ".join(normalized.split())
+    return normalized
+
+
+def funding_address_specificity(address):
+    normalized = normalized_nonempty(address)
+    if not normalized:
+        return "missing"
+    tokens = normalized.split()
+    has_digit = any(char.isdigit() for char in normalized)
+    if has_digit:
+        return "specific"
+    if len(tokens) <= 4 and set(tokens).issubset(FUNDING_COARSE_LOCATION_TOKENS):
+        return "coarse"
+    if len(tokens) <= 3:
+        return "coarse"
+    return "specific"
+
+
+def funding_record_signatures(sanitized_record):
+    return {
+        "organization_normalized": normalized_nonempty(sanitized_record.get("name", "")),
+        "address_normalized": normalized_nonempty(sanitized_record.get("address", "")),
+        "address_core_normalized": funding_address_core(sanitized_record.get("address", "")),
+        "address_specificity": funding_address_specificity(sanitized_record.get("address", "")),
+        "agency_normalized": normalized_nonempty(sanitized_record.get("agency", "")),
+        "year_signature": normalized_nonempty(sanitized_record.get("year", "")),
+        "amount_signature": normalize_amount_signature(sanitized_record.get("amount", "")),
+        "name_tokens": token_list(sanitized_record.get("name", ""), 12),
+        "address_tokens": token_list(sanitized_record.get("address", ""), 16),
+    }
+
+
+def camera_overlap_tokens(record):
+    model_tokens = set(token_list(record.get("model", ""), 8))
+    description_tokens = set(token_list(strip_marketplace_boilerplate(record.get("description", "")), 18))
+    return model_tokens | description_tokens
+
+
+def classify_camera_negative(left_record, right_record):
+    left_brand = normalized_nonempty(left_record.get("brand", ""))
+    right_brand = normalized_nonempty(right_record.get("brand", ""))
+    left_model = normalized_nonempty(left_record.get("model", ""))
+    right_model = normalized_nonempty(right_record.get("model", ""))
+
+    if left_brand and left_brand == right_brand and left_model and right_model and left_model != right_model:
+        return 1
+
+    overlap = camera_overlap_tokens(left_record) & camera_overlap_tokens(right_record)
+    if overlap:
+        return 2
+
+    return 3
+
+
+def classify_funding_negative(left_record, right_record):
+    left_signatures = funding_record_signatures(left_record)
+    right_signatures = funding_record_signatures(right_record)
+
+    same_name = (
+        left_signatures["organization_normalized"]
+        and left_signatures["organization_normalized"] == right_signatures["organization_normalized"]
+    )
+    same_agency = (
+        left_signatures["agency_normalized"]
+        and left_signatures["agency_normalized"] == right_signatures["agency_normalized"]
+    )
+    year_differs = (
+        left_signatures["year_signature"]
+        and right_signatures["year_signature"]
+        and left_signatures["year_signature"] != right_signatures["year_signature"]
+    )
+    amount_differs = (
+        left_signatures["amount_signature"]
+        and right_signatures["amount_signature"]
+        and left_signatures["amount_signature"] != right_signatures["amount_signature"]
+    )
+    weak_address = (
+        left_signatures["address_specificity"] != "specific"
+        or right_signatures["address_specificity"] != "specific"
+    )
+
+    if same_name and same_agency and year_differs and amount_differs and weak_address:
+        return 1
+    if same_name and same_agency and weak_address:
+        return 2
+    if same_name:
+        return 3
+    return 4
+
+
+def classify_funding_positive(left_record, right_record):
+    left_signatures = funding_record_signatures(left_record)
+    right_signatures = funding_record_signatures(right_record)
+
+    same_name = (
+        left_signatures["organization_normalized"]
+        and left_signatures["organization_normalized"] == right_signatures["organization_normalized"]
+    )
+    same_agency = (
+        left_signatures["agency_normalized"]
+        and left_signatures["agency_normalized"] == right_signatures["agency_normalized"]
+    )
+    same_amount = (
+        left_signatures["amount_signature"]
+        and left_signatures["amount_signature"] == right_signatures["amount_signature"]
+    )
+    specific_address_match = (
+        left_signatures["address_normalized"]
+        and left_signatures["address_normalized"] == right_signatures["address_normalized"]
+        and left_signatures["address_specificity"] == "specific"
+        and right_signatures["address_specificity"] == "specific"
+    )
+    specific_address_core_match = (
+        left_signatures["address_core_normalized"]
+        and left_signatures["address_core_normalized"] == right_signatures["address_core_normalized"]
+        and left_signatures["address_specificity"] == "specific"
+        and right_signatures["address_specificity"] == "specific"
+    )
+    both_weak_address = (
+        left_signatures["address_specificity"] != "specific"
+        and right_signatures["address_specificity"] != "specific"
+    )
+
+    if same_name and (specific_address_match or specific_address_core_match):
+        return 1
+    if same_name and same_agency and same_amount and both_weak_address:
+        return 2
+    if same_name:
+        return 3
+    return 4
+
+
+def collect_camera_graph_negatives(graph, match_lookup, excluded_nodes, count, records_by_id, rng):
+    bucket_limits = {1: max(count * 2, count), 2: max(count * 3, count), 3: max(count * 4, count)}
+    buckets = {1: [], 2: [], 3: []}
+    seen = set()
+
+    for left, right in graph.edges():
+        if left in excluded_nodes or right in excluded_nodes:
+            continue
+        if pair_is_match(left, right, match_lookup):
+            continue
+        normalized_pair = frozenset((left, right))
+        if normalized_pair in seen:
+            continue
+
+        hardness = classify_camera_negative(records_by_id[left], records_by_id[right])
+        if len(buckets[hardness]) >= bucket_limits[hardness]:
+            continue
+
+        buckets[hardness].append((left, right))
+        seen.add(normalized_pair)
+        if (
+            len(buckets[1]) >= min(count, bucket_limits[1])
+            and len(buckets[1]) + len(buckets[2]) >= count
+            and len(buckets[3]) >= min(count, bucket_limits[3])
+        ):
+            break
+
+    negatives = []
+    selected_seen = set()
+    for bucket_index in (1, 2, 3):
+        bucket = buckets[bucket_index][:]
+        rng.shuffle(bucket)
+        for pair in bucket:
+            normalized_pair = frozenset(pair)
+            if normalized_pair in selected_seen:
+                continue
+            negatives.append(pair)
+            selected_seen.add(normalized_pair)
+            if len(negatives) >= count:
+                return negatives
+    return negatives
+
+
+def collect_funding_positive_examples(ground_truth_pairs, excluded_nodes, count, records_by_id, rng):
+    buckets = {1: [], 2: [], 3: [], 4: []}
+    for pair in ground_truth_pairs:
+        if not pair.isdisjoint(excluded_nodes):
+            continue
+        left, right = tuple(sorted(pair))
+        hardness = classify_funding_positive(records_by_id[left], records_by_id[right])
+        buckets[hardness].append((left, right))
+
+    positives = []
+    seen = set()
+    for bucket_index in (1, 2, 3, 4):
+        bucket = buckets[bucket_index][:]
+        rng.shuffle(bucket)
+        for pair in bucket:
+            normalized_pair = frozenset(pair)
+            if normalized_pair in seen:
+                continue
+            positives.append(pair)
+            seen.add(normalized_pair)
+            if len(positives) >= count:
+                return positives
+    return positives
+
+
+def collect_funding_graph_negatives(graph, match_lookup, excluded_nodes, count, records_by_id, rng):
+    bucket_limits = {1: max(count * 3, count), 2: max(count * 3, count), 3: max(count * 4, count), 4: max(count * 2, count)}
+    buckets = {1: [], 2: [], 3: [], 4: []}
+    seen = set()
+
+    for left, right in graph.edges():
+        if left in excluded_nodes or right in excluded_nodes:
+            continue
+        if pair_is_match(left, right, match_lookup):
+            continue
+        normalized_pair = frozenset((left, right))
+        if normalized_pair in seen:
+            continue
+
+        hardness = classify_funding_negative(records_by_id[left], records_by_id[right])
+        if len(buckets[hardness]) >= bucket_limits[hardness]:
+            continue
+
+        buckets[hardness].append((left, right))
+        seen.add(normalized_pair)
+        if len(buckets[1]) >= count and len(buckets[2]) >= count:
+            break
+
+    negatives = []
+    selected_seen = set()
+    for bucket_index in (1, 2, 3, 4):
+        bucket = buckets[bucket_index][:]
+        rng.shuffle(bucket)
+        for pair in bucket:
+            normalized_pair = frozenset(pair)
+            if normalized_pair in selected_seen:
+                continue
+            negatives.append(pair)
+            selected_seen.add(normalized_pair)
+            if len(negatives) >= count:
+                return negatives
+    return negatives
+
+
 def infer_prompt_profile(dataset_name, field_names):
     field_set = set(field_names)
     if dataset_name in {"camera", "wdc80"}:
@@ -191,11 +528,7 @@ def to_json_compatible(value):
 
 def build_generic_entity_payload(record_id, records_by_id, prompt_profile):
     record = records_by_id[record_id]
-    sanitized_record = {
-        key: value
-        for key, value in record.items()
-        if key != "id" and str(value).strip()
-    }
+    sanitized_record = record_without_id(record)
     payload = {
         "entity_id": str(record_id),
         "entity_size": 1,
@@ -216,6 +549,22 @@ def build_generic_entity_payload(record_id, records_by_id, prompt_profile):
                 },
             }
         )
+    if prompt_profile == "camera_catalog":
+        payload.update(
+            {
+                "brand_normalized": normalized_nonempty(sanitized_record.get("brand", "")),
+                "model_normalized": normalized_nonempty(sanitized_record.get("model", "")),
+                "brand_model_signature": camera_brand_model_signature(sanitized_record),
+                "model_tokens": token_list(sanitized_record.get("model", ""), 8),
+                "description_core_tokens": token_list(
+                    strip_marketplace_boilerplate(sanitized_record.get("description", "")),
+                    24,
+                ),
+                "spec_signatures": camera_spec_signatures(sanitized_record),
+            }
+        )
+    if prompt_profile == "funding_award":
+        payload.update(funding_record_signatures(sanitized_record))
     return payload
 
 
@@ -231,7 +580,7 @@ def build_batch_entities(batch_nodes, records_by_id, prompt_profile):
     return entities, alias_to_record_id
 
 
-def build_pair_example(name, left_record, right_record, is_match):
+def build_pair_example(name, left_entity, right_entity, is_match):
     answer = {
         "clusters": [{"cluster_id": "c1", "entity_ids": ["A", "B"]}]
         if is_match
@@ -242,10 +591,7 @@ def build_pair_example(name, left_record, right_record, is_match):
     }
     return {
         "name": name,
-        "entities": [
-            {"entity_id": "A", "entity_size": 1, "records": [left_record]},
-            {"entity_id": "B", "entity_size": 1, "records": [right_record]},
-        ],
+        "entities": [left_entity, right_entity],
         "answer": answer,
     }
 
@@ -288,7 +634,17 @@ def sample_batch_from_components(components, batch_size, rng):
     raise RuntimeError(f"Unable to build a batch of size {batch_size}; graph only covered {total} nodes.")
 
 
-def mine_positive_examples(ground_truth_pairs, excluded_nodes, count, rng):
+def mine_positive_examples(ground_truth_pairs, excluded_nodes, count, rng, *, prompt_profile=None, records_by_id=None):
+    if prompt_profile == "funding_award" and records_by_id:
+        positives = collect_funding_positive_examples(
+            ground_truth_pairs,
+            excluded_nodes,
+            count,
+            records_by_id,
+            rng,
+        )
+        if len(positives) >= count:
+            return positives
     allowed = [
         tuple(sorted(pair))
         for pair in ground_truth_pairs
@@ -299,15 +655,38 @@ def mine_positive_examples(ground_truth_pairs, excluded_nodes, count, rng):
     return rng.sample(allowed, count)
 
 
-def mine_negative_examples(graph, match_lookup, excluded_nodes, count, rng):
-    graph_negatives = []
-    for left, right in graph.edges():
-        if left in excluded_nodes or right in excluded_nodes:
-            continue
-        if not pair_is_match(left, right, match_lookup):
-            graph_negatives.append((left, right))
-    if len(graph_negatives) >= count:
-        return rng.sample(graph_negatives, count)
+def mine_negative_examples(graph, match_lookup, excluded_nodes, count, rng, *, prompt_profile=None, records_by_id=None):
+    if prompt_profile == "camera_catalog" and records_by_id:
+        graph_negatives = collect_camera_graph_negatives(
+            graph,
+            match_lookup,
+            excluded_nodes,
+            count,
+            records_by_id,
+            rng,
+        )
+        if len(graph_negatives) >= count:
+            return graph_negatives
+    elif prompt_profile == "funding_award" and records_by_id:
+        graph_negatives = collect_funding_graph_negatives(
+            graph,
+            match_lookup,
+            excluded_nodes,
+            count,
+            records_by_id,
+            rng,
+        )
+        if len(graph_negatives) >= count:
+            return graph_negatives
+    else:
+        graph_negatives = []
+        for left, right in graph.edges():
+            if left in excluded_nodes or right in excluded_nodes:
+                continue
+            if not pair_is_match(left, right, match_lookup):
+                graph_negatives.append((left, right))
+        if len(graph_negatives) >= count:
+            return rng.sample(graph_negatives, count)
 
     negatives = list(graph_negatives)
     allowed_nodes = [node for node in graph.nodes() if node not in excluded_nodes]
@@ -327,23 +706,31 @@ def mine_negative_examples(graph, match_lookup, excluded_nodes, count, rng):
     return negatives
 
 
-def build_few_shot_examples(records_by_id, positive_pairs, negative_pairs):
+def build_few_shot_examples(records_by_id, positive_pairs, negative_pairs, prompt_profile):
     examples = []
     for index, (left, right) in enumerate(positive_pairs, start=1):
+        left_entity = build_generic_entity_payload(left, records_by_id, prompt_profile)
+        right_entity = build_generic_entity_payload(right, records_by_id, prompt_profile)
+        left_entity["entity_id"] = "A"
+        right_entity["entity_id"] = "B"
         examples.append(
             build_pair_example(
                 f"Positive {index}",
-                {k: v for k, v in records_by_id[left].items() if k != "id" and v},
-                {k: v for k, v in records_by_id[right].items() if k != "id" and v},
+                left_entity,
+                right_entity,
                 True,
             )
         )
     for index, (left, right) in enumerate(negative_pairs, start=1):
+        left_entity = build_generic_entity_payload(left, records_by_id, prompt_profile)
+        right_entity = build_generic_entity_payload(right, records_by_id, prompt_profile)
+        left_entity["entity_id"] = "A"
+        right_entity["entity_id"] = "B"
         examples.append(
             build_pair_example(
                 f"Negative {index}",
-                {k: v for k, v in records_by_id[left].items() if k != "id" and v},
-                {k: v for k, v in records_by_id[right].items() if k != "id" and v},
+                left_entity,
+                right_entity,
                 False,
             )
         )
@@ -421,7 +808,7 @@ def main():
     match_lookup = build_match_lookup(df_ground_truth)
     ground_truth_pairs = build_ground_truth_pairs(df_ground_truth)
     components = compute_components(graph)
-    prompt_profile = infer_prompt_profile(args.dataset, field_names)
+    prompt_profile = args.prompt_profile or infer_prompt_profile(args.dataset, field_names)
 
     print(
         f"{args.dataset} nodes, matches, edges {len(graph.nodes())} {len(df_ground_truth)} {len(graph.edges())}",
@@ -460,6 +847,8 @@ def main():
                 excluded_nodes,
                 args.few_shot_pairs_per_class,
                 example_rng,
+                prompt_profile=prompt_profile,
+                records_by_id=records_by_id,
             )
             negative_examples = mine_negative_examples(
                 graph,
@@ -467,8 +856,15 @@ def main():
                 excluded_nodes,
                 args.few_shot_pairs_per_class,
                 example_rng,
+                prompt_profile=prompt_profile,
+                records_by_id=records_by_id,
             )
-            few_shot_examples = build_few_shot_examples(records_by_id, positive_examples, negative_examples)
+            few_shot_examples = build_few_shot_examples(
+                records_by_id,
+                positive_examples,
+                negative_examples,
+                prompt_profile,
+            )
 
         entities, alias_to_record_id = build_batch_entities(batch_nodes, records_by_id, prompt_profile)
         response = oracle.resolve_batch(

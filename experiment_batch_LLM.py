@@ -15,6 +15,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib import colors
 
 import llm_config
 
@@ -189,26 +190,23 @@ def parse_float(value):
     return float(value)
 
 
-def load_completed_result(csv_path: Path, duration_seconds: float | None = None) -> dict[str, object]:
-    if not csv_path.exists():
-        raise RuntimeError(f"Missing child summary CSV: {csv_path}")
-
-    with csv_path.open(newline="") as handle:
-        rows = list(csv.DictReader(handle))
-    if len(rows) != 1:
-        raise RuntimeError(f"Expected exactly one row in {csv_path}, found {len(rows)}")
-
-    row = rows[0]
+def normalize_record_row(
+    row: dict[str, str],
+    *,
+    duration_seconds: float | None = None,
+    default_status: str = "completed",
+) -> dict[str, object]:
     normalized: dict[str, object] = {}
     for field in MASTER_FIELDNAMES:
         if field == "csv_results_path":
-            normalized[field] = str(csv_path)
+            normalized[field] = row.get(field, "")
             continue
         if field == "status":
-            normalized[field] = "completed"
+            normalized[field] = row.get(field) or default_status
             continue
         if field == "duration_seconds":
-            normalized[field] = duration_seconds
+            value = row.get(field, "")
+            normalized[field] = duration_seconds if duration_seconds is not None else parse_float(value)
             continue
 
         value = row.get(field, "")
@@ -219,6 +217,32 @@ def load_completed_result(csv_path: Path, duration_seconds: float | None = None)
         else:
             normalized[field] = value
 
+    return normalized
+
+
+def load_result_records(csv_path: Path, duration_seconds: float | None = None) -> list[dict[str, object]]:
+    if not csv_path.exists():
+        raise RuntimeError(f"Missing child summary CSV: {csv_path}")
+
+    with csv_path.open(newline="") as handle:
+        rows = list(csv.DictReader(handle))
+
+    records = []
+    for row in rows:
+        normalized = normalize_record_row(row, duration_seconds=duration_seconds)
+        if not normalized.get("csv_results_path"):
+            normalized["csv_results_path"] = str(csv_path)
+        records.append(normalized)
+    return records
+
+
+def load_completed_result(csv_path: Path, duration_seconds: float | None = None) -> dict[str, object]:
+    records = load_result_records(csv_path, duration_seconds=duration_seconds)
+    if len(records) != 1:
+        raise RuntimeError(f"Expected exactly one row in {csv_path}, found {len(records)}")
+    normalized = records[0]
+    if not normalized.get("csv_results_path"):
+        normalized["csv_results_path"] = str(csv_path)
     return normalized
 
 
@@ -320,26 +344,25 @@ def render_heatmap(
     model_name: str,
     pdf_path: Path,
     png_path: Path,
+    title_text: str | None = None,
+    footer_text: str | None = None,
 ) -> None:
-    matrix = f1_matrix(records, datasets, batch_sizes)
-    partial = len(records) < len(datasets) * len(batch_sizes)
-    labels = datasets + ["mean"]
+    matrix = f1_matrix(records, datasets, batch_sizes)[: len(datasets), :]
+    labels = datasets
 
-    cmap = plt.cm.YlGnBu.copy()
+    cmap = plt.cm.RdYlGn.copy()
     cmap.set_bad(color="#f1f1f1")
+    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
 
-    fig, ax = plt.subplots(figsize=(7.2, 3.8))
-    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", vmin=0.0, vmax=1.0, cmap=cmap)
-    colorbar = fig.colorbar(image, ax=ax, fraction=0.045, pad=0.04)
-    colorbar.set_label("F1")
+    fig, ax = plt.subplots(figsize=(4.05, 2.4))
+    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, norm=norm)
 
     ax.set_xticks(np.arange(len(batch_sizes)))
     ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
     ax.set_yticks(np.arange(len(labels)))
     ax.set_yticklabels(labels)
+    ax.set_title("F-score")
     ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Dataset")
-    ax.set_title(plot_title(args, model_name, partial))
 
     for row_index in range(matrix.shape[0]):
         for col_index in range(matrix.shape[1]):
@@ -349,12 +372,10 @@ def render_heatmap(
                 color = "#666666"
             else:
                 text = f"{value:.3f}"
-                color = "white" if value >= 0.55 else "#1f1f1f"
+                color = "white" if value >= 0.8 else "#1f1f1f"
             ax.text(col_index, row_index, text, ha="center", va="center", color=color, fontsize=8)
 
-    footer = "Mean row is the unweighted average across completed datasets. Pending cells indicate unfinished runs."
-    fig.text(0.5, 0.01, footer, ha="center", fontsize=8)
-    fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.tight_layout()
     fig.savefig(pdf_path, bbox_inches="tight")
     fig.savefig(png_path, dpi=180, bbox_inches="tight")
     plt.close(fig)
@@ -369,6 +390,7 @@ def render_grouped_bars(
     model_name: str,
     pdf_path: Path,
     png_path: Path,
+    title_text: str | None = None,
 ) -> None:
     matrix = f1_matrix(records, datasets, batch_sizes)
     labels = datasets + ["mean"]
@@ -401,7 +423,7 @@ def render_grouped_bars(
     ax.set_ylim(0, 1.08)
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("F1")
-    ax.set_title(plot_title(args, model_name, len(records) < len(datasets) * len(batch_sizes)))
+    ax.set_title(title_text or plot_title(args, model_name, len(records) < len(datasets) * len(batch_sizes)))
     ax.grid(axis="y", alpha=0.25)
     ax.legend(ncol=3, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.14))
     fig.tight_layout()
@@ -419,6 +441,7 @@ def render_lines(
     model_name: str,
     pdf_path: Path,
     png_path: Path,
+    title_text: str | None = None,
 ) -> None:
     matrix = f1_matrix(records, datasets, batch_sizes)
     fig, ax = plt.subplots(figsize=(7.6, 4.0))
@@ -437,7 +460,7 @@ def render_lines(
     ax.set_ylim(0, 1.02)
     ax.set_xlabel("Batch Size")
     ax.set_ylabel("F1")
-    ax.set_title(plot_title(args, model_name, len(records) < len(datasets) * len(batch_sizes)))
+    ax.set_title(title_text or plot_title(args, model_name, len(records) < len(datasets) * len(batch_sizes)))
     ax.grid(alpha=0.25)
     ax.legend(ncol=3, fontsize=8, loc="upper center", bbox_to_anchor=(0.5, -0.14))
     fig.tight_layout()

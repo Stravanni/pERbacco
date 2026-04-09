@@ -111,6 +111,55 @@ Critical output constraints:
 - Return valid JSON only, matching the exact schema.
 """
 
+CAMERA_CATALOG_ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy camera catalog records.
+
+Goal:
+- Partition the input entities by exact real-world camera model identity.
+- Two entities match only if they refer to the same specific camera model or tightly equivalent SKU family, not merely cameras from the same brand.
+- Every input entity must appear exactly once in the output, including singleton clusters.
+
+How to decide:
+- Brand plus normalized model identifier is the strongest evidence. If both align closely, prefer merging even when one listing is sparse.
+- Ignore marketplace boilerplate such as seller or site names, "best price", location suffixes, year suffixes, and shopping-site text. Those are weak evidence.
+- Compatible `mp`, `optical_zoom`, `digital_zoom`, `screen_size`, and `type` support a merge, but missing specs should not block a merge by themselves.
+- Treat color, offer, and price wording as weak evidence unless it changes the actual model identity.
+- Use helper fields such as `brand_normalized`, `model_normalized`, `brand_model_signature`, `model_tokens`, `description_core_tokens`, and `spec_signatures` as strong signals when they align.
+- Strong negative evidence includes different normalized model identifiers within the same brand, incompatible core specs, or descriptions that clearly refer to different camera families.
+- Same brand alone is not enough. Do not merge based only on generic camera terms or one overlapping token.
+- If evidence is mixed, keep precision high by separating records unless brand, model, and compatible specs strongly support the same camera.
+
+Critical output constraints:
+- Use only the provided input entity ids in `entity_ids`.
+- Never output member record ids, invented ids, or text explanations.
+- Return valid JSON only, matching the exact schema.
+"""
+
+FUNDING_AWARD_ZERO_SHOT_INSTRUCTIONS = """You are an entity-resolution oracle for noisy funding award records.
+
+Goal:
+- Partition the input entities by exact duplicate funding-entry identity as represented in the dataset.
+- Two entities match only if they are duplicate records of the same underlying funding entry, not merely the same organization receiving related or recurring awards.
+- Every input entity must appear exactly once in the output, including singleton clusters.
+
+How to decide:
+- Compare organization name, address, year, agency, and amount jointly.
+- Same organization name alone is not enough. The same organization can appear in multiple years and can receive multiple awards from the same agency.
+- Exact or near-exact organization name plus closely matching address is strong evidence, even if formatting differs.
+- If address matches closely and looks specific, year or amount differences can still be consistent with duplicate funding entries in this dataset.
+- If `address_core_normalized` matches and the address looks specific, treat zip-code or minor formatting differences as normal noise.
+- When one or both addresses are missing or only coarse location text, treat name agreement as weak evidence.
+- If year and amount both differ while address evidence is weak or missing, prefer keeping the records separate, even when organization name and agency match.
+- If address evidence is missing on both sides, exact amount plus matching organization name and agency can support a merge, but do not merge on exact amount alone when other fields conflict.
+- Use helper fields such as `organization_normalized`, `address_normalized`, `address_core_normalized`, `address_specificity`, `agency_normalized`, `year_signature`, and `amount_signature` as evidence summaries.
+- Strong negative evidence includes recurring annual awards to the same organization, different amounts across years with weak address evidence, or only coarse borough/city address overlap.
+- If evidence is mixed, choose the safer option and keep the entities separate.
+
+Critical output constraints:
+- Use only the provided input entity ids in `entity_ids`.
+- Never output member record ids, invented ids, or text explanations.
+- Return valid JSON only, matching the exact schema.
+"""
+
 def _pair_example(name: str, left: dict[str, str], right: dict[str, str], is_match: bool) -> dict[str, Any]:
     answer = {
         "clusters": [{"cluster_id": "c1", "entity_ids": ["A", "B"]}]
@@ -512,11 +561,21 @@ class OpenAIEntityOracle:
 
     def _resolve_prompt_profile(self, prompt_profile: str | None = None) -> str:
         chosen = (prompt_profile or "bibliographic").strip() or "bibliographic"
-        if chosen not in {"bibliographic", "generic_tabular", "product_catalog"}:
+        if chosen not in {
+            "bibliographic",
+            "generic_tabular",
+            "product_catalog",
+            "camera_catalog",
+            "funding_award",
+        }:
             raise ValueError(f"Unsupported prompt profile: {chosen}")
         return chosen
 
     def _instructions_for_profile(self, prompt_profile: str) -> str:
+        if prompt_profile == "funding_award":
+            return FUNDING_AWARD_ZERO_SHOT_INSTRUCTIONS
+        if prompt_profile == "camera_catalog":
+            return CAMERA_CATALOG_ZERO_SHOT_INSTRUCTIONS
         if prompt_profile == "product_catalog":
             return PRODUCT_CATALOG_ZERO_SHOT_INSTRUCTIONS
         if prompt_profile == "generic_tabular":
@@ -524,7 +583,7 @@ class OpenAIEntityOracle:
         return BIBLIOGRAPHIC_ZERO_SHOT_INSTRUCTIONS
 
     def _default_examples_for_profile(self, prompt_profile: str) -> list[dict[str, Any]]:
-        if prompt_profile in {"generic_tabular", "product_catalog"}:
+        if prompt_profile in {"generic_tabular", "product_catalog", "camera_catalog", "funding_award"}:
             return []
         return FEW_SHOT_EXAMPLES
 
