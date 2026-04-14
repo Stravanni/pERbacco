@@ -870,12 +870,13 @@ class OpenAIEntityOracle:
             field_names=field_names,
             few_shot_examples=few_shot_examples,
         )
-        heuristic_input = _estimate_tokens_from_text(prompt)
+        heuristic_prompt = f"{instructions.strip()}\n\n{prompt}" if instructions.strip() else prompt
+        heuristic_input = _estimate_tokens_from_text(heuristic_prompt)
         heuristic_output = max(80, 16 * len(entities))
 
         estimate = {
             "source": "heuristic",
-            "prompt_chars": len(prompt),
+            "prompt_chars": len(heuristic_prompt),
             "input_tokens": heuristic_input,
             "output_tokens": heuristic_output,
             "total_tokens": heuristic_input + heuristic_output,

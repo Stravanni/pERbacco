@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import os
 from argparse import ArgumentParser
@@ -97,6 +98,28 @@ def default_footer_text():
     )
 
 
+def load_saving_lookup(output_dir: Path, datasets: list[str], batch_sizes: list[int]):
+    candidates = sorted(output_dir.glob("token_estimation_*.csv"))
+    if not candidates:
+        fallback_dir = Path("results/plot_LLM")
+        candidates = sorted(fallback_dir.glob("token_estimation_*.csv"))
+    if not candidates:
+        return None
+
+    lookup = {}
+    with candidates[0].open(newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["cost_model"] != "recursive_all_records" or row["scenario"] != "p50":
+                continue
+            dataset = row["dataset"]
+            batch_size = int(row["batch_size"])
+            if dataset not in datasets or batch_size not in batch_sizes:
+                continue
+            saving_value = 1.0 if batch_size == 2 else float(row["saving_factor_vs_pairwise_edges"])
+            lookup[(dataset, batch_size)] = saving_value
+    return lookup or None
+
+
 def main():
     args = parse_args()
     base_csv = Path(args.base_master_csv)
@@ -139,6 +162,7 @@ def main():
     footer_text = args.footer_text or default_footer_text()
     plot_args = SimpleNamespace(num_batches=10, few_shot_pairs_per_class="mixed", seed=0)
     model_label = ", ".join(sorted({str(record["openai_model"]) for record in sorted_records}))
+    saving_lookup = load_saving_lookup(Path(args.output_dir), datasets, batch_sizes)
 
     if "heatmap" in args.plot_modes:
         render_heatmap(
@@ -151,6 +175,7 @@ def main():
             png_path=paths["heatmap_png"],
             title_text=title_text,
             footer_text=footer_text,
+            saving_lookup=saving_lookup,
         )
     if "bars" in args.plot_modes:
         render_grouped_bars(

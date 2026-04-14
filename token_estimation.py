@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
 import os
@@ -15,8 +16,7 @@ os.environ.setdefault("MPLCONFIGDIR", "/tmp/mpl")
 import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
-from matplotlib import ticker
-from matplotlib.lines import Line2D
+from matplotlib import colors, ticker
 from batch_simple_LLM import (
     build_batch_entities,
     build_few_shot_examples,
@@ -32,26 +32,28 @@ from batch_simple_LLM import (
 from oracle_LL import OpenAIEntityOracle
 
 
-DEFAULT_BATCH_SIZES = [2, 5, 10, 20, 50]
-DEFAULT_PLOT_MODES = ["overview", "heatmap", "pareto"]
+DEFAULT_PLOT_MODES = ["overview", "heatmap", "combined", "combined_with_avg"]
+DEFAULT_SAVING_NORMALIZATION = "batch-size-2"
+ESTIMATION_MODEL_VERSION = "phi-ideal-prompt-aware-v6"
+NAIVE_EDGE_SAMPLE_SIZE = 50000
 SCENARIOS = {
     "p25": 0.25,
     "p50": 0.50,
     "p75": 0.75,
 }
-COST_MODELS = [
-    "recursive_graph_aware",
-    "recursive_all_records",
-    "one_pass_lower_bound",
-]
+COST_MODELS = ["phi_ideal"]
 CSV_FIELDNAMES = [
     "dataset",
     "prompt_profile",
     "prompt_mode",
     "few_shot_pairs_per_class",
+    "few_shot_positive_pairs",
+    "few_shot_negative_pairs",
     "openai_model",
     "token_source_mode",
     "token_source",
+    "dataset_recall",
+    "dataset_precision",
     "dataset_nodes",
     "graph_nodes",
     "graph_edges",
@@ -64,6 +66,8 @@ CSV_FIELDNAMES = [
     "batch_size",
     "cost_model",
     "scenario",
+    "phi_calls_min",
+    "phi_calls_max",
     "estimated_calls",
     "batch_prompt_chars",
     "batch_input_tokens",
@@ -72,10 +76,24 @@ CSV_FIELDNAMES = [
     "total_input_tokens",
     "total_output_tokens",
     "total_tokens",
+    "true_cluster_pairwise_comparisons",
+    "graph_aware_collapse_calls",
+    "saved_pairwise_comparisons",
+    "comparison_saving_factor_vs_true_clusters",
+    "comparison_saving_factor_vs_batch2",
+    "graph_aware_per_call_token_ratio_vs_batch2",
+    "mapped_token_saving_factor_vs_batch2",
+    "naive_graph_edge_pair_tokens",
+    "naive_graph_edge_pairwise_total_tokens",
+    "plot_token_total",
+    "naive_vs_best_token_saving_factor",
     "pairwise_baseline_calls",
     "pairwise_baseline_total_tokens",
     "saving_factor_vs_pairwise_edges",
     "token_reduction_fraction_vs_pairwise_edges",
+    "batch2_baseline_total_tokens",
+    "saving_factor_vs_batch2",
+    "token_reduction_fraction_vs_batch2",
 ]
 DATASET_DISPLAY_NAMES = {
     "camera": "Camera",
@@ -106,22 +124,51 @@ def parse_args():
             "with a materialized top-level similarity graph."
         )
     )
+    parser.add_argument("--phi-json", type=str, required=True)
     parser.add_argument("--datasets", nargs="*", default=None)
-    parser.add_argument("--batch-sizes", nargs="*", type=int, default=DEFAULT_BATCH_SIZES)
-    parser.add_argument("--prompt-mode", choices=["zero-shot", "few-shot"], default="zero-shot")
-    parser.add_argument("--few-shot-pairs-per-class", type=int, default=3)
+    parser.add_argument("--batch-sizes", nargs="*", type=int, default=None)
+    parser.add_argument("--prompt-mode", choices=["zero-shot", "few-shot"], default="few-shot")
+    parser.add_argument("--few-shot-pairs-per-class", type=int, default=None)
+    parser.add_argument("--few-shot-positive-pairs", type=int, default=None)
+    parser.add_argument("--few-shot-negative-pairs", type=int, default=None)
     parser.add_argument("--token-source", choices=["heuristic", "openai-if-available"], default="heuristic")
     parser.add_argument("--openai-model", type=str, default=None)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output-dir", type=str, default="results/plot_LLM")
     parser.add_argument("--force-recompute", action="store_true")
     parser.add_argument(
+        "--saving-normalization",
+        choices=[
+            "naive-vs-best-token",
+            "mapped-token-batch-size-2",
+            "comparison-batch-size-2",
+            "comparison-true-clusters",
+            "token-batch-size-2",
+            "token-pairwise-edges",
+            "token-pairwise-edges-anchored-b2",
+            "pairwise-edges",
+            "pairwise-edges-anchored-b2",
+            "batch-size-2",
+        ],
+        default=DEFAULT_SAVING_NORMALIZATION,
+    )
+    parser.add_argument(
         "--plot-modes",
         nargs="*",
         default=DEFAULT_PLOT_MODES,
-        choices=["overview", "heatmap", "pareto"],
+        choices=["overview", "heatmap", "combined", "combined_with_avg"],
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.few_shot_pairs_per_class is not None:
+        if args.few_shot_positive_pairs is None:
+            args.few_shot_positive_pairs = args.few_shot_pairs_per_class
+        if args.few_shot_negative_pairs is None:
+            args.few_shot_negative_pairs = args.few_shot_pairs_per_class
+    if args.few_shot_positive_pairs is None:
+        args.few_shot_positive_pairs = 10
+    if args.few_shot_negative_pairs is None:
+        args.few_shot_negative_pairs = 10
+    return args
 
 
 def sanitize_label(value):
@@ -182,6 +229,102 @@ def resolve_datasets(requested: list[str] | None) -> list[str]:
     return requested
 
 
+def load_phi_payload(phi_json_argument: str) -> dict[str, object]:
+    candidate = phi_json_argument.strip()
+    if candidate.startswith("{") or candidate.startswith("["):
+        payload = json.loads(candidate)
+    else:
+        path = Path(candidate)
+        if not path.exists():
+            raise RuntimeError(f"--phi-json is neither valid JSON nor an existing path: {phi_json_argument}")
+        payload = json.loads(path.read_text())
+    if not isinstance(payload, dict):
+        raise RuntimeError("Phi JSON must decode to a top-level object.")
+    return payload
+
+
+def resolve_phi_config(phi_payload: dict[str, object], datasets: list[str]) -> dict[str, dict[str, object]]:
+    resolved = {}
+    for dataset in datasets:
+        metadata = phi_payload.get(dataset)
+        phi_entry = phi_payload.get(f"{dataset}_Phi")
+        if not isinstance(metadata, dict):
+            raise RuntimeError(f"Phi JSON is missing metadata for dataset '{dataset}'.")
+        if not isinstance(phi_entry, dict):
+            raise RuntimeError(f"Phi JSON is missing '{dataset}_Phi'.")
+
+        batch_ranges: dict[int, tuple[int, int]] = {}
+        for key, value in phi_entry.items():
+            try:
+                batch_size = int(key)
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(f"Invalid Phi batch size for dataset '{dataset}': {key!r}") from exc
+            if (
+                not isinstance(value, (list, tuple))
+                or len(value) != 2
+                or any(not isinstance(item, Integral) for item in value)
+            ):
+                raise RuntimeError(
+                    f"Phi entry for dataset '{dataset}', batch size {batch_size}, must be a two-integer list."
+                )
+            low, high = int(value[0]), int(value[1])
+            if low <= 0 or high <= 0 or low > high:
+                raise RuntimeError(
+                    f"Phi entry for dataset '{dataset}', batch size {batch_size}, must satisfy 0 < low <= high."
+                )
+            batch_ranges[batch_size] = (low, high)
+
+        resolved[dataset] = {
+            "recall": float(metadata.get("recall", 0.0)),
+            "precision": float(metadata.get("precision", 0.0)),
+            "batch_ranges": batch_ranges,
+        }
+    return resolved
+
+
+def resolve_batch_sizes(args, phi_config: dict[str, dict[str, object]], datasets: list[str]) -> list[int]:
+    if args.batch_sizes is None:
+        shared = None
+        for dataset in datasets:
+            keys = set(phi_config[dataset]["batch_ranges"].keys())
+            shared = keys if shared is None else shared & keys
+        batch_sizes = sorted(shared or [])
+        if not batch_sizes:
+            raise RuntimeError("No shared batch sizes were found across the selected datasets in the Phi JSON.")
+        return batch_sizes
+
+    batch_sizes = sorted(set(args.batch_sizes))
+    missing = []
+    for dataset in datasets:
+        available = set(phi_config[dataset]["batch_ranges"].keys())
+        for batch_size in batch_sizes:
+            if batch_size not in available:
+                missing.append(f"{dataset}:b{batch_size}")
+    if missing:
+        raise RuntimeError(
+            "Requested batch sizes are missing from the Phi JSON for: "
+            + ", ".join(missing[:8])
+            + ("..." if len(missing) > 8 else "")
+        )
+    return batch_sizes
+
+
+def phi_fingerprint(phi_config: dict[str, dict[str, object]], datasets: list[str]) -> str:
+    normalized = {
+        dataset: {
+            "recall": phi_config[dataset]["recall"],
+            "precision": phi_config[dataset]["precision"],
+            "batch_ranges": {
+                str(batch_size): list(phi_config[dataset]["batch_ranges"][batch_size])
+                for batch_size in sorted(phi_config[dataset]["batch_ranges"].keys())
+            },
+        }
+        for dataset in datasets
+    }
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def build_output_paths(args, model_name: str) -> dict[str, Path]:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -194,7 +337,7 @@ def build_output_paths(args, model_name: str) -> dict[str, Path]:
         sanitize_label(args.token_source),
     ]
     if args.prompt_mode == "few-shot":
-        stem_parts.append(f"fewshot{args.few_shot_pairs_per_class}x2")
+        stem_parts.append(f"fewshot{args.few_shot_positive_pairs}p{args.few_shot_negative_pairs}n")
     stem = "_".join(stem_parts)
 
     return {
@@ -206,8 +349,14 @@ def build_output_paths(args, model_name: str) -> dict[str, Path]:
         "overview_linear_png": output_dir / f"{stem}_overview.png",
         "heatmap_pdf": output_dir / f"{stem}_heatmap.pdf",
         "heatmap_png": output_dir / f"{stem}_heatmap.png",
-        "pareto_pdf": output_dir / f"{stem}_pareto.pdf",
-        "pareto_png": output_dir / f"{stem}_pareto.png",
+        "combined_pdf": output_dir / f"{stem}_combined.pdf",
+        "combined_png": output_dir / f"{stem}_combined.png",
+        "combined_with_avg_pdf": output_dir / f"{stem}_combined_with_avg.pdf",
+        "combined_with_avg_png": output_dir / f"{stem}_combined_with_avg.png",
+        "intro_tsaving_pdf": output_dir / f"{stem}_intro_tsaving.pdf",
+        "intro_tsaving_png": output_dir / f"{stem}_intro_tsaving.png",
+        "intro_fscore_pdf": output_dir / f"{stem}_intro_fscore.pdf",
+        "intro_fscore_png": output_dir / f"{stem}_intro_fscore.png",
         "legacy_csv": legacy_output_dir / f"{stem}.csv",
         "legacy_json": legacy_output_dir / f"{stem}.json",
         "legacy_plot_paths": [
@@ -251,6 +400,10 @@ def compute_component_sizes(graph: nx.Graph) -> list[int]:
     return sorted((len(component) for component in nx.connected_components(graph)), reverse=True)
 
 
+def compute_components(graph: nx.Graph) -> list[tuple[object, ...]]:
+    return [tuple(component) for component in nx.connected_components(graph)]
+
+
 def score_dataset_nodes(records_by_id, dataset_nodes, prompt_profile):
     scored_nodes = []
     for node in dataset_nodes:
@@ -271,6 +424,73 @@ def select_batch_nodes(scored_nodes, batch_size: int, quantile: float) -> list[o
     return [node for _, node in scored_nodes[start : start + batch_size]]
 
 
+def sample_graph_edges(graph: nx.Graph, *, sample_size: int, rng: random.Random) -> list[tuple[object, object]]:
+    sampled_edges: list[tuple[object, object]] = []
+    for index, edge in enumerate(graph.edges()):
+        if index < sample_size:
+            sampled_edges.append(edge)
+            continue
+        replacement_index = rng.randint(0, index)
+        if replacement_index < sample_size:
+            sampled_edges[replacement_index] = edge
+    return sampled_edges
+
+
+def estimate_representative_edge_pairs(state, oracle, args) -> dict[str, dict[str, int | str]]:
+    if state["graph_edges"] == 0:
+        return {
+            scenario_label: {
+                "source": "heuristic",
+                "prompt_chars": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+            for scenario_label in SCENARIOS
+        }
+
+    dataset_seed = sum((index + 1) * ord(char) for index, char in enumerate(state["dataset"]))
+    rng = random.Random(args.seed + dataset_seed + 1777)
+    sampled_edges = sample_graph_edges(
+        state["graph"],
+        sample_size=min(state["graph_edges"], NAIVE_EDGE_SAMPLE_SIZE),
+        rng=rng,
+    )
+    scored_edges = []
+    for left, right in sampled_edges:
+        ordered = tuple(
+            sorted(
+                (left, right),
+                key=lambda node: (state["node_score_lookup"][node], node_sort_key(node)),
+            )
+        )
+        score = state["node_score_lookup"][ordered[0]] + state["node_score_lookup"][ordered[1]]
+        scored_edges.append((score, ordered[0], ordered[1]))
+    scored_edges.sort(
+        key=lambda item: (
+            item[0],
+            node_sort_key(item[1]),
+            node_sort_key(item[2]),
+        )
+    )
+
+    estimates = {}
+    cache = {}
+    for scenario_label, quantile in SCENARIOS.items():
+        position = int(quantile * (len(scored_edges) - 1))
+        _, left, right = scored_edges[position]
+        estimate = estimate_specific_batch_tokens(
+            state,
+            oracle,
+            args,
+            [left, right],
+            scenario_label,
+            cache,
+        )
+        estimates[scenario_label] = estimate
+    return estimates
+
+
 def build_few_shot_examples_for_batch(state, args, batch_nodes, batch_size: int, scenario_label: str):
     if args.prompt_mode != "few-shot":
         return []
@@ -287,7 +507,7 @@ def build_few_shot_examples_for_batch(state, args, batch_nodes, batch_size: int,
     positive_examples = mine_positive_examples(
         state["ground_truth_pairs"],
         excluded_nodes,
-        args.few_shot_pairs_per_class,
+        args.few_shot_positive_pairs,
         rng,
         prompt_profile=state["prompt_profile"],
         records_by_id=state["records_by_id"],
@@ -296,7 +516,7 @@ def build_few_shot_examples_for_batch(state, args, batch_nodes, batch_size: int,
         state["graph"],
         state["match_lookup"],
         excluded_nodes,
-        args.few_shot_pairs_per_class,
+        args.few_shot_negative_pairs,
         rng,
         prompt_profile=state["prompt_profile"],
         records_by_id=state["records_by_id"],
@@ -341,6 +561,166 @@ def estimate_recursive_calls(component_sizes: list[int], batch_size: int, *, inc
     return minimum + math.ceil(sum(rests) / batch_size)
 
 
+def scenario_index(length: int, scenario_label: str) -> int:
+    if length <= 1:
+        return 0
+    return int(SCENARIOS[scenario_label] * (length - 1))
+
+
+def choose_representative_node(members, scenario_label: str, node_score_lookup):
+    sorted_members = sorted(members, key=lambda node: (node_score_lookup[node], node_sort_key(node)))
+    return sorted_members[scenario_index(len(sorted_members), scenario_label)]
+
+
+def estimate_specific_batch_tokens(state, oracle, args, batch_nodes, scenario_label: str, cache):
+    cache_key = (scenario_label, tuple(batch_nodes))
+    if cache_key in cache:
+        return cache[cache_key]
+
+    few_shot_examples = build_few_shot_examples_for_batch(state, args, batch_nodes, len(batch_nodes), scenario_label)
+    entities, _ = build_batch_entities(batch_nodes, state["records_by_id"], state["prompt_profile"])
+    estimate = oracle.estimate_batch_tokens(
+        entities,
+        prompt_profile=state["prompt_profile"],
+        dataset_name=state["dataset"],
+        field_names=state["field_names"],
+        few_shot_examples=few_shot_examples,
+        prompt_mode=args.prompt_mode,
+    )
+    cache[cache_key] = estimate
+    return estimate
+
+
+def empty_usage():
+    return {
+        "source": "heuristic",
+        "prompt_chars": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+    }
+
+
+def add_usage(total, estimate):
+    total["prompt_chars"] += int(estimate["prompt_chars"])
+    total["input_tokens"] += int(estimate["input_tokens"])
+    total["output_tokens"] += int(estimate["output_tokens"])
+    total["total_tokens"] += int(estimate["total_tokens"])
+    if total["source"] != estimate["source"]:
+        total["source"] = estimate["source"] if total["total_tokens"] == int(estimate["total_tokens"]) else "mixed"
+
+
+def collapse_component_tokens(component_nodes, batch_size: int, scenario_label: str, state, oracle, args, cache):
+    if len(component_nodes) <= 1:
+        representative = component_nodes[0]
+        return empty_usage(), 0, representative
+
+    items = [
+        {
+            "members": (node,),
+            "representative": node,
+        }
+        for node in sorted(component_nodes, key=lambda node: (state["node_score_lookup"][node], node_sort_key(node)))
+    ]
+    usage = empty_usage()
+    calls = 0
+
+    while len(items) > 1:
+        items.sort(
+            key=lambda item: (
+                state["node_score_lookup"][item["representative"]],
+                node_sort_key(item["representative"]),
+            )
+        )
+        if len(items) <= batch_size:
+            batch_items = items
+            batch_nodes = [item["representative"] for item in batch_items]
+            estimate = estimate_specific_batch_tokens(state, oracle, args, batch_nodes, scenario_label, cache)
+            add_usage(usage, estimate)
+            merged_members = [member for item in batch_items for member in item["members"]]
+            representative = choose_representative_node(merged_members, scenario_label, state["node_score_lookup"])
+            items = [{"members": tuple(merged_members), "representative": representative}]
+            calls += 1
+            break
+
+        new_items = []
+        index = 0
+        while index + batch_size <= len(items):
+            batch_items = items[index : index + batch_size]
+            batch_nodes = [item["representative"] for item in batch_items]
+            estimate = estimate_specific_batch_tokens(state, oracle, args, batch_nodes, scenario_label, cache)
+            add_usage(usage, estimate)
+            merged_members = [member for item in batch_items for member in item["members"]]
+            representative = choose_representative_node(merged_members, scenario_label, state["node_score_lookup"])
+            new_items.append({"members": tuple(merged_members), "representative": representative})
+            calls += 1
+            index += batch_size
+        new_items.extend(items[index:])
+        items = new_items
+
+    return usage, calls, items[0]["representative"]
+
+
+def estimate_one_pass_tokens(representatives, batch_size: int, scenario_label: str, state, oracle, args, cache):
+    ordered_reps = sorted(
+        representatives,
+        key=lambda node: (state["node_score_lookup"][node], node_sort_key(node)),
+    )
+    usage = empty_usage()
+    calls = 0
+    index = 0
+    while index < len(ordered_reps):
+        batch_nodes = ordered_reps[index : index + batch_size]
+        if len(batch_nodes) <= 1:
+            break
+        estimate = estimate_specific_batch_tokens(state, oracle, args, batch_nodes, scenario_label, cache)
+        add_usage(usage, estimate)
+        calls += 1
+        index += batch_size
+    return usage, calls
+
+
+def summarize_usage(state, batch_size: int, cost_model: str, scenario_label: str, usage, calls, graph_aware_collapse_calls: int):
+    average_prompt_chars = round(usage["prompt_chars"] / calls) if calls else 0
+    average_input_tokens = round(usage["input_tokens"] / calls) if calls else 0
+    average_output_tokens = round(usage["output_tokens"] / calls) if calls else 0
+    average_total_tokens = round(usage["total_tokens"] / calls) if calls else 0
+    true_cluster_pairwise_comparisons = int(state["true_cluster_pairwise_comparisons"])
+    saved_pairwise_comparisons = max(0, true_cluster_pairwise_comparisons - graph_aware_collapse_calls)
+    return {
+        "dataset": state["dataset"],
+        "prompt_profile": state["prompt_profile"],
+        "prompt_mode": state["prompt_mode"],
+        "few_shot_pairs_per_class": state["few_shot_pairs_per_class"],
+        "openai_model": state["openai_model"],
+        "token_source_mode": state["token_source_mode"],
+        "token_source": usage["source"],
+        "dataset_nodes": state["dataset_node_count"],
+        "graph_nodes": state["graph_nodes"],
+        "graph_edges": state["graph_edges"],
+        "duplicate_pair_nodes": state["duplicate_pair_nodes"],
+        "singleton_only_nodes": state["singleton_only_nodes"],
+        "connected_components": state["connected_components"],
+        "largest_component": state["largest_component"],
+        "duplicate_connected_components": state["duplicate_connected_components"],
+        "duplicate_largest_component": state["duplicate_largest_component"],
+        "batch_size": batch_size,
+        "cost_model": cost_model,
+        "scenario": scenario_label,
+        "estimated_calls": calls,
+        "batch_prompt_chars": average_prompt_chars,
+        "batch_input_tokens": average_input_tokens,
+        "batch_output_tokens": average_output_tokens,
+        "batch_total_tokens": average_total_tokens,
+        "total_input_tokens": usage["input_tokens"],
+        "total_output_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "true_cluster_pairwise_comparisons": true_cluster_pairwise_comparisons,
+        "graph_aware_collapse_calls": graph_aware_collapse_calls,
+        "saved_pairwise_comparisons": saved_pairwise_comparisons,
+    }
+
+
 def build_dataset_state(dataset: str):
     records_by_id, field_names = load_dataset_records(dataset)
     df_ground_truth, graph = load_raw_graph(dataset, "False")
@@ -356,6 +736,13 @@ def build_dataset_state(dataset: str):
     duplicate_graph = build_component_graph(duplicate_pair_nodes, df_ground_truth)
     all_component_sizes = compute_component_sizes(all_records_graph)
     duplicate_component_sizes = compute_component_sizes(duplicate_graph) if duplicate_pair_nodes else []
+    all_components = compute_components(all_records_graph)
+    duplicate_components = compute_components(duplicate_graph) if duplicate_pair_nodes else []
+    true_cluster_pairwise_comparisons = sum(
+        len(component) * (len(component) - 1) // 2 for component in duplicate_components if len(component) > 1
+    )
+    scored_nodes = score_dataset_nodes(records_by_id, dataset_nodes, prompt_profile)
+    node_score_lookup = {node: score for score, node in scored_nodes}
 
     state = {
         "dataset": dataset,
@@ -375,7 +762,11 @@ def build_dataset_state(dataset: str):
         "duplicate_largest_component": duplicate_component_sizes[0] if duplicate_component_sizes else 0,
         "all_component_sizes": all_component_sizes,
         "duplicate_component_sizes": duplicate_component_sizes,
-        "scored_nodes": score_dataset_nodes(records_by_id, dataset_nodes, prompt_profile),
+        "all_components": all_components,
+        "duplicate_components": duplicate_components,
+        "true_cluster_pairwise_comparisons": true_cluster_pairwise_comparisons,
+        "scored_nodes": scored_nodes,
+        "node_score_lookup": node_score_lookup,
     }
 
     if len(dataset_nodes) == 0:
@@ -386,81 +777,121 @@ def build_dataset_state(dataset: str):
     return state
 
 
-def build_rows_for_dataset(state, oracle, args):
+def phi_scenario_calls(call_bounds: tuple[int, int]) -> dict[str, int]:
+    lower, upper = call_bounds
+    return {
+        "p25": lower,
+        "p50": (lower + upper) // 2,
+        "p75": upper,
+    }
+
+
+def build_rows_for_dataset(state, oracle, args, phi_dataset: dict[str, object], batch_sizes: list[int]):
     rows = []
+    state = dict(state)
+    state["prompt_mode"] = args.prompt_mode
+    state["few_shot_pairs_per_class"] = args.few_shot_pairs_per_class
+    state["few_shot_positive_pairs"] = args.few_shot_positive_pairs
+    state["few_shot_negative_pairs"] = args.few_shot_negative_pairs
+    state["openai_model"] = oracle.model
+    state["token_source_mode"] = args.token_source
     print(
         f"[{state['dataset']}] nodes={state['dataset_node_count']} graph_edges={state['graph_edges']} "
         f"prompt_profile={state['prompt_profile']}",
         flush=True,
     )
+    naive_edge_pair_estimates = estimate_representative_edge_pairs(state, oracle, args)
+    phi_batch_ranges = phi_dataset["batch_ranges"]
+    dataset_recall = float(phi_dataset["recall"])
+    dataset_precision = float(phi_dataset["precision"])
 
-    for batch_size in args.batch_sizes:
+    for batch_size in batch_sizes:
         if batch_size < 2:
             raise RuntimeError("Batch sizes must be at least 2.")
         if state["dataset_node_count"] < batch_size:
             raise RuntimeError(
                 f"Dataset {state['dataset']} has only {state['dataset_node_count']} nodes, smaller than batch size {batch_size}."
             )
-
         batch_estimates = estimate_representative_batches(state, oracle, args, batch_size)
-        estimated_calls = {
-            "recursive_graph_aware": estimate_recursive_calls(
-                state["duplicate_component_sizes"],
-                batch_size,
-                include_singletons=False,
-            ),
-            "recursive_all_records": estimate_recursive_calls(
-                state["all_component_sizes"],
-                batch_size,
-                include_singletons=True,
-            ),
-            "one_pass_lower_bound": math.ceil(state["dataset_node_count"] / batch_size),
-        }
+        phi_calls_min, phi_calls_max = phi_batch_ranges[batch_size]
+        scenario_calls = phi_scenario_calls((phi_calls_min, phi_calls_max))
+        median_calls = 0
+        median_total_tokens = 0
+        median_source = "heuristic"
 
-        for cost_model in COST_MODELS:
-            for scenario_label in SCENARIOS:
-                estimate = batch_estimates[scenario_label]
-                calls = estimated_calls[cost_model]
-                rows.append(
-                    {
-                        "dataset": state["dataset"],
-                        "prompt_profile": state["prompt_profile"],
-                        "prompt_mode": args.prompt_mode,
-                        "few_shot_pairs_per_class": args.few_shot_pairs_per_class,
-                        "openai_model": oracle.model,
-                        "token_source_mode": args.token_source,
-                        "token_source": estimate["source"],
-                        "dataset_nodes": state["dataset_node_count"],
-                        "graph_nodes": state["graph_nodes"],
-                        "graph_edges": state["graph_edges"],
-                        "duplicate_pair_nodes": state["duplicate_pair_nodes"],
-                        "singleton_only_nodes": state["singleton_only_nodes"],
-                        "connected_components": state["connected_components"],
-                        "largest_component": state["largest_component"],
-                        "duplicate_connected_components": state["duplicate_connected_components"],
-                        "duplicate_largest_component": state["duplicate_largest_component"],
-                        "batch_size": batch_size,
-                        "cost_model": cost_model,
-                        "scenario": scenario_label,
-                        "estimated_calls": calls,
-                        "batch_prompt_chars": int(estimate["prompt_chars"]),
-                        "batch_input_tokens": int(estimate["input_tokens"]),
-                        "batch_output_tokens": int(estimate["output_tokens"]),
-                        "batch_total_tokens": int(estimate["total_tokens"]),
-                        "total_input_tokens": int(estimate["input_tokens"]) * calls,
-                        "total_output_tokens": int(estimate["output_tokens"]) * calls,
-                        "total_tokens": int(estimate["total_tokens"]) * calls,
-                    }
-                )
+        for scenario_label in SCENARIOS:
+            estimate = batch_estimates[scenario_label]
+            naive_edge_estimate = naive_edge_pair_estimates[scenario_label]
+            calls = int(scenario_calls[scenario_label])
+            total_input_tokens = int(estimate["input_tokens"]) * calls
+            total_output_tokens = int(estimate["output_tokens"]) * calls
+            total_tokens = total_input_tokens + total_output_tokens
+            true_cluster_pairwise_comparisons = int(state["true_cluster_pairwise_comparisons"])
+            saved_pairwise_comparisons = max(0, true_cluster_pairwise_comparisons - calls)
+            naive_pair_tokens = int(naive_edge_estimate["total_tokens"])
+            naive_pairwise_total_tokens = naive_pair_tokens * state["graph_edges"]
+            row = {
+                "dataset": state["dataset"],
+                "prompt_profile": state["prompt_profile"],
+                "prompt_mode": args.prompt_mode,
+                "few_shot_pairs_per_class": args.few_shot_pairs_per_class,
+                "few_shot_positive_pairs": args.few_shot_positive_pairs,
+                "few_shot_negative_pairs": args.few_shot_negative_pairs,
+                "openai_model": oracle.model,
+                "token_source_mode": args.token_source,
+                "token_source": estimate["source"],
+                "dataset_recall": dataset_recall,
+                "dataset_precision": dataset_precision,
+                "dataset_nodes": state["dataset_node_count"],
+                "graph_nodes": state["graph_nodes"],
+                "graph_edges": state["graph_edges"],
+                "duplicate_pair_nodes": state["duplicate_pair_nodes"],
+                "singleton_only_nodes": state["singleton_only_nodes"],
+                "connected_components": state["connected_components"],
+                "largest_component": state["largest_component"],
+                "duplicate_connected_components": state["duplicate_connected_components"],
+                "duplicate_largest_component": state["duplicate_largest_component"],
+                "batch_size": batch_size,
+                "cost_model": "phi_ideal",
+                "scenario": scenario_label,
+                "phi_calls_min": phi_calls_min,
+                "phi_calls_max": phi_calls_max,
+                "estimated_calls": calls,
+                "batch_prompt_chars": int(estimate["prompt_chars"]),
+                "batch_input_tokens": int(estimate["input_tokens"]),
+                "batch_output_tokens": int(estimate["output_tokens"]),
+                "batch_total_tokens": int(estimate["total_tokens"]),
+                "total_input_tokens": total_input_tokens,
+                "total_output_tokens": total_output_tokens,
+                "total_tokens": total_tokens,
+                "true_cluster_pairwise_comparisons": true_cluster_pairwise_comparisons,
+                "graph_aware_collapse_calls": calls,
+                "saved_pairwise_comparisons": saved_pairwise_comparisons,
+                "comparison_saving_factor_vs_true_clusters": None,
+                "comparison_saving_factor_vs_batch2": None,
+                "graph_aware_per_call_token_ratio_vs_batch2": None,
+                "mapped_token_saving_factor_vs_batch2": None,
+                "naive_graph_edge_pair_tokens": naive_pair_tokens,
+                "naive_graph_edge_pairwise_total_tokens": naive_pairwise_total_tokens,
+                "plot_token_total": None,
+                "naive_vs_best_token_saving_factor": None,
+                "pairwise_baseline_calls": None,
+                "pairwise_baseline_total_tokens": None,
+                "saving_factor_vs_pairwise_edges": None,
+                "token_reduction_fraction_vs_pairwise_edges": None,
+                "batch2_baseline_total_tokens": None,
+                "saving_factor_vs_batch2": None,
+                "token_reduction_fraction_vs_batch2": None,
+            }
+            rows.append(row)
+            if scenario_label == "p50":
+                median_calls = calls
+                median_total_tokens = total_tokens
+                median_source = estimate["source"]
 
-        median_row = batch_estimates["p50"]
         print(
-            f"  batch={batch_size}: source={median_row['source']} "
-            f"batch_tokens={median_row['total_tokens']} "
-            f"calls(graph-aware/all/one-pass)="
-            f"{estimated_calls['recursive_graph_aware']}/"
-            f"{estimated_calls['recursive_all_records']}/"
-            f"{estimated_calls['one_pass_lower_bound']}",
+            f"  batch={batch_size}: source={median_source} total_tokens(phi_ideal)={median_total_tokens} "
+            f"calls(phi_ideal)={median_calls}",
             flush=True,
         )
 
@@ -480,19 +911,90 @@ def add_saving_factor_fields(rows, *, baseline_batch_size: int = 2):
                 f"Missing baseline batch size {baseline_batch_size} for dataset={key[0]} cost_model={key[1]} scenario={key[2]}."
             )
         pairwise_baseline_calls = int(baseline_row["graph_edges"])
-        pairwise_baseline_total_tokens = pairwise_baseline_calls * int(baseline_row["batch_total_tokens"])
+        pairwise_baseline_total_tokens = int(baseline_row["naive_graph_edge_pairwise_total_tokens"])
+        batch2_baseline_total_tokens = int(baseline_row["total_tokens"])
+        batch2_graph_aware_collapse_calls = int(baseline_row["graph_aware_collapse_calls"])
         for row in by_batch.values():
             total_tokens = int(row["total_tokens"])
-            saving_factor = pairwise_baseline_total_tokens / total_tokens if total_tokens else 0.0
-            reduction_fraction = (
+            true_cluster_pairwise_comparisons = int(row["true_cluster_pairwise_comparisons"])
+            graph_aware_collapse_calls = int(row["graph_aware_collapse_calls"])
+            pairwise_saving_factor = pairwise_baseline_total_tokens / total_tokens if total_tokens else 0.0
+            pairwise_reduction_fraction = (
                 1.0 - (total_tokens / pairwise_baseline_total_tokens)
                 if pairwise_baseline_total_tokens
                 else 0.0
             )
+            batch2_saving_factor = batch2_baseline_total_tokens / total_tokens if total_tokens else 0.0
+            batch2_reduction_fraction = (
+                1.0 - (total_tokens / batch2_baseline_total_tokens)
+                if batch2_baseline_total_tokens
+                else 0.0
+            )
+            if true_cluster_pairwise_comparisons == 0 and graph_aware_collapse_calls == 0:
+                comparison_saving_factor_vs_true_clusters = 1.0
+            elif graph_aware_collapse_calls == 0:
+                comparison_saving_factor_vs_true_clusters = 0.0
+            else:
+                comparison_saving_factor_vs_true_clusters = (
+                    true_cluster_pairwise_comparisons / graph_aware_collapse_calls
+                )
+            if batch2_graph_aware_collapse_calls == 0 and graph_aware_collapse_calls == 0:
+                comparison_saving_factor_vs_batch2 = 1.0
+            elif graph_aware_collapse_calls == 0:
+                comparison_saving_factor_vs_batch2 = 0.0
+            else:
+                comparison_saving_factor_vs_batch2 = batch2_graph_aware_collapse_calls / graph_aware_collapse_calls
+            row["comparison_saving_factor_vs_true_clusters"] = round(
+                comparison_saving_factor_vs_true_clusters,
+                6,
+            )
+            row["comparison_saving_factor_vs_batch2"] = round(comparison_saving_factor_vs_batch2, 6)
             row["pairwise_baseline_calls"] = pairwise_baseline_calls
             row["pairwise_baseline_total_tokens"] = pairwise_baseline_total_tokens
-            row["saving_factor_vs_pairwise_edges"] = round(saving_factor, 6)
-            row["token_reduction_fraction_vs_pairwise_edges"] = round(reduction_fraction, 6)
+            row["saving_factor_vs_pairwise_edges"] = round(pairwise_saving_factor, 6)
+            row["token_reduction_fraction_vs_pairwise_edges"] = round(pairwise_reduction_fraction, 6)
+            row["batch2_baseline_total_tokens"] = batch2_baseline_total_tokens
+            row["saving_factor_vs_batch2"] = round(batch2_saving_factor, 6)
+            row["token_reduction_fraction_vs_batch2"] = round(batch2_reduction_fraction, 6)
+
+    by_dataset_scenario = {}
+    for row in rows:
+        key = (row["dataset"], row["scenario"])
+        by_dataset_scenario.setdefault(key, {})[row["batch_size"]] = row
+
+    for key, by_batch in by_dataset_scenario.items():
+        baseline_row = by_batch[baseline_batch_size]
+        baseline_calls = int(baseline_row["graph_aware_collapse_calls"])
+        baseline_avg_tokens = float(baseline_row["batch_total_tokens"] or 0)
+        naive_baseline_total = int(baseline_row["naive_graph_edge_pairwise_total_tokens"])
+
+        for row in by_batch.values():
+            current_calls = int(row["graph_aware_collapse_calls"])
+            current_avg_tokens = float(row["batch_total_tokens"] or 0)
+
+            if baseline_avg_tokens == 0.0 and current_avg_tokens == 0.0:
+                per_call_ratio = 1.0
+            elif current_avg_tokens == 0.0:
+                per_call_ratio = 0.0
+            else:
+                per_call_ratio = baseline_avg_tokens / current_avg_tokens
+
+            mapped_token_saving_factor = float(row["comparison_saving_factor_vs_batch2"]) * per_call_ratio
+            row["graph_aware_per_call_token_ratio_vs_batch2"] = round(per_call_ratio, 6)
+            row["mapped_token_saving_factor_vs_batch2"] = round(mapped_token_saving_factor, 6)
+
+            if int(row["batch_size"]) == baseline_batch_size:
+                plot_token_total = naive_baseline_total
+            else:
+                plot_token_total = int(row["total_tokens"])
+            if naive_baseline_total == 0 and plot_token_total == 0:
+                naive_vs_best_token_saving_factor = 1.0
+            elif plot_token_total == 0:
+                naive_vs_best_token_saving_factor = 0.0
+            else:
+                naive_vs_best_token_saving_factor = naive_baseline_total / plot_token_total
+            row["plot_token_total"] = plot_token_total
+            row["naive_vs_best_token_saving_factor"] = round(naive_vs_best_token_saving_factor, 6)
     return rows
 
 
@@ -541,6 +1043,8 @@ def load_csv_rows(path: Path):
                 value = row.get(field, "")
                 if field in {
                     "few_shot_pairs_per_class",
+                    "few_shot_positive_pairs",
+                    "few_shot_negative_pairs",
                     "dataset_nodes",
                     "graph_nodes",
                     "graph_edges",
@@ -551,6 +1055,8 @@ def load_csv_rows(path: Path):
                     "duplicate_connected_components",
                     "duplicate_largest_component",
                     "batch_size",
+                    "phi_calls_min",
+                    "phi_calls_max",
                     "estimated_calls",
                     "batch_prompt_chars",
                     "batch_input_tokens",
@@ -559,13 +1065,29 @@ def load_csv_rows(path: Path):
                     "total_input_tokens",
                     "total_output_tokens",
                     "total_tokens",
+                    "true_cluster_pairwise_comparisons",
+                    "graph_aware_collapse_calls",
+                    "saved_pairwise_comparisons",
+                    "naive_graph_edge_pair_tokens",
+                    "naive_graph_edge_pairwise_total_tokens",
+                    "plot_token_total",
                     "pairwise_baseline_calls",
                     "pairwise_baseline_total_tokens",
+                    "batch2_baseline_total_tokens",
                 }:
                     normalized[field] = parse_int(value)
                 elif field in {
+                    "dataset_recall",
+                    "dataset_precision",
+                    "naive_vs_best_token_saving_factor",
+                    "graph_aware_per_call_token_ratio_vs_batch2",
+                    "mapped_token_saving_factor_vs_batch2",
+                    "comparison_saving_factor_vs_true_clusters",
+                    "comparison_saving_factor_vs_batch2",
                     "saving_factor_vs_pairwise_edges",
                     "token_reduction_fraction_vs_pairwise_edges",
+                    "saving_factor_vs_batch2",
+                    "token_reduction_fraction_vs_batch2",
                 }:
                     normalized[field] = parse_float(value)
                 else:
@@ -613,6 +1135,68 @@ def build_lookup(rows):
         (row["dataset"], row["batch_size"], row["cost_model"], row["scenario"]): row
         for row in rows
     }
+
+
+def saving_factor_field(args) -> str:
+    if args.saving_normalization == "naive-vs-best-token":
+        return "naive_vs_best_token_saving_factor"
+    if args.saving_normalization == "mapped-token-batch-size-2":
+        return "mapped_token_saving_factor_vs_batch2"
+    if args.saving_normalization == "comparison-true-clusters":
+        return "comparison_saving_factor_vs_true_clusters"
+    if args.saving_normalization == "comparison-batch-size-2":
+        return "comparison_saving_factor_vs_batch2"
+    if args.saving_normalization in {"pairwise-edges", "token-pairwise-edges"}:
+        return "saving_factor_vs_pairwise_edges"
+    if args.saving_normalization in {"pairwise-edges-anchored-b2", "token-pairwise-edges-anchored-b2"}:
+        return "saving_factor_vs_pairwise_edges"
+    return "saving_factor_vs_batch2"
+
+
+def saving_axis_label(args) -> str:
+    if args.saving_normalization in {"comparison-true-clusters", "comparison-batch-size-2"}:
+        return "Comparison Saving Factor"
+    return "Token Saving Factor"
+
+
+def normalization_reference_text(args) -> str:
+    if args.saving_normalization == "naive-vs-best-token":
+        return (
+            "naive batch-size-2 graph-edge pairwise total tokens as the baseline, "
+            "versus Phi-driven ideal-method total tokens for batch sizes greater than 2"
+        )
+    if args.saving_normalization == "mapped-token-batch-size-2":
+        return (
+            "graph-aware comparison saving at batch size 2 divided by graph-aware comparison saving at batch size b, "
+            "scaled by the ratio of average tokens per graph-aware call at batch size 2 versus batch size b"
+        )
+    if args.saving_normalization == "comparison-true-clusters":
+        return "true duplicate-cluster pairwise comparisons divided by graph-aware collapse calls"
+    if args.saving_normalization == "comparison-batch-size-2":
+        return "within each dataset/scenario, graph-aware collapse calls at batch size 2 divided by graph-aware collapse calls at batch size b"
+    if args.saving_normalization in {"pairwise-edges", "token-pairwise-edges"}:
+        return "pairwise graph-edge queries priced with batch-size-2 tokens"
+    if args.saving_normalization in {"pairwise-edges-anchored-b2", "token-pairwise-edges-anchored-b2"}:
+        return "pairwise graph-edge queries priced with batch-size-2 tokens, with batch size 2 anchored at 1 in the overview plot"
+    return "within each dataset/cost-model/scenario, total tokens at batch size 2"
+
+
+def plotted_saving_factor(row, *, args) -> float:
+    if args.saving_normalization in {"pairwise-edges-anchored-b2", "token-pairwise-edges-anchored-b2"} and int(row["batch_size"]) == 2:
+        return 1.0
+    return float(row[saving_factor_field(args)])
+
+
+def plotted_cost_model(args) -> str:
+    return "phi_ideal"
+
+
+def saving_tick_formatter(value, _position):
+    if value < 0:
+        return ""
+    if value < 10:
+        return f"{value:.1f}x"
+    return f"{value:.0f}x"
 
 
 def best_batch_size_by_cost_model(rows, datasets, batch_sizes):
@@ -663,10 +1247,23 @@ def write_summary_json(path: Path, *, args, oracle, datasets, batch_sizes, rows,
             "pdf": str(paths["heatmap_pdf"]),
             "png": str(paths["heatmap_png"]),
         }
-    if "pareto" in args.plot_modes:
-        plot_paths["pareto"] = {
-            "pdf": str(paths["pareto_pdf"]),
-            "png": str(paths["pareto_png"]),
+    if "combined" in args.plot_modes:
+        plot_paths["combined"] = {
+            "pdf": str(paths["combined_pdf"]),
+            "png": str(paths["combined_png"]),
+        }
+    if "combined_with_avg" in args.plot_modes:
+        plot_paths["combined_with_avg"] = {
+            "pdf": str(paths["combined_with_avg_pdf"]),
+            "png": str(paths["combined_with_avg_png"]),
+        }
+        plot_paths["intro_tsaving"] = {
+            "pdf": str(paths["intro_tsaving_pdf"]),
+            "png": str(paths["intro_tsaving_png"]),
+        }
+        plot_paths["intro_fscore"] = {
+            "pdf": str(paths["intro_fscore_pdf"]),
+            "png": str(paths["intro_fscore_png"]),
         }
 
     payload = {
@@ -675,10 +1272,16 @@ def write_summary_json(path: Path, *, args, oracle, datasets, batch_sizes, rows,
             "batch_sizes": batch_sizes,
             "prompt_mode": args.prompt_mode,
             "few_shot_pairs_per_class": args.few_shot_pairs_per_class,
+            "few_shot_positive_pairs": args.few_shot_positive_pairs,
+            "few_shot_negative_pairs": args.few_shot_negative_pairs,
             "openai_model": oracle.model,
             "token_source_mode": args.token_source,
+            "estimation_model_version": ESTIMATION_MODEL_VERSION,
+            "naive_edge_sample_size": NAIVE_EDGE_SAMPLE_SIZE,
             "normalization_reference_batch_size": 2,
-            "normalization_reference": "pairwise graph-edge queries priced with batch-size-2 tokens",
+            "saving_normalization": args.saving_normalization,
+            "normalization_reference": normalization_reference_text(args),
+            "phi_fingerprint": args.phi_fingerprint,
             "seed": args.seed,
             "plot_modes": args.plot_modes,
             "force_recompute": args.force_recompute,
@@ -725,10 +1328,18 @@ def cleanup_legacy_plots(paths):
         paths["overview_linear_png"],
         paths["output_dir"] / f"{paths['csv'].stem}_overview_log.pdf",
         paths["output_dir"] / f"{paths['csv'].stem}_overview_log.png",
+        paths["output_dir"] / f"{paths['csv'].stem}_pareto.pdf",
+        paths["output_dir"] / f"{paths['csv'].stem}_pareto.png",
         paths["heatmap_pdf"],
         paths["heatmap_png"],
-        paths["pareto_pdf"],
-        paths["pareto_png"],
+        paths["combined_pdf"],
+        paths["combined_png"],
+        paths["combined_with_avg_pdf"],
+        paths["combined_with_avg_png"],
+        paths["intro_tsaving_pdf"],
+        paths["intro_tsaving_png"],
+        paths["intro_fscore_pdf"],
+        paths["intro_fscore_png"],
     ]
     for plot_path in removable:
         if plot_path.exists():
@@ -738,16 +1349,17 @@ def cleanup_legacy_plots(paths):
 def render_overview(rows, *, datasets, batch_sizes, args, paths):
     lookup = build_lookup(rows)
     fig, ax = plt.subplots(figsize=(4.05, 2.4))
+    cost_model = plotted_cost_model(args)
 
+    y_min = float("inf")
     for dataset in datasets:
         color = LINE_COLORS[dataset]
         marker = LINE_MARKERS[dataset]
         p50_values = np.array(
             [
-                float(
-                    lookup[(dataset, batch_size, "recursive_all_records", "p50")][
-                        "saving_factor_vs_pairwise_edges"
-                    ]
+                plotted_saving_factor(
+                    lookup[(dataset, batch_size, cost_model, "p50")],
+                    args=args,
                 )
                 for batch_size in batch_sizes
             ]
@@ -759,27 +1371,30 @@ def render_overview(rows, *, datasets, batch_sizes, args, paths):
             color=color,
             label=pretty_dataset_name(dataset),
         )
-    all_values = []
     y_max = 1.05
     for dataset in datasets:
         dataset_values = [
-            float(
-                lookup[(dataset, batch_size, "recursive_all_records", "p50")][
-                    "saving_factor_vs_pairwise_edges"
-                ]
+            plotted_saving_factor(
+                lookup[(dataset, batch_size, cost_model, "p50")],
+                args=args,
             )
             for batch_size in batch_sizes
         ]
-        all_values.extend(dataset_values)
         dataset_max = max(dataset_values)
+        dataset_min = min(dataset_values)
         y_max = max(y_max, dataset_max)
+        y_min = min(y_min, dataset_min)
 
     ax.set_xticks(batch_sizes)
-    ax.set_ylim(0.0, y_max * 1.08)
-    ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.0fx"))
+    if y_min == float("inf"):
+        y_min = 0.0
+    padding = max(0.05, (y_max - y_min) * 0.08)
+    ax.set_ylim(max(0.0, y_min - padding), y_max + padding)
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(saving_tick_formatter))
     ax.grid(True, which="major", axis="both")
     ax.set_xlabel("Batch Size")
-    ax.set_ylabel("Token Saving Factor w.r.t. Pairwise")
+    ax.set_ylabel(saving_axis_label(args))
     fig.legend(
         ncol=len(datasets),
         loc="upper center",
@@ -809,12 +1424,16 @@ def render_heatmap(rows, *, datasets, batch_sizes, args, paths):
     }
 
     matrix = np.array(
-        [[experiment_lookup[(dataset, batch_size)]["f1"] for batch_size in batch_sizes] for dataset in datasets],
+        [
+            [experiment_lookup.get((dataset, batch_size), {}).get("f1", np.nan) for batch_size in batch_sizes]
+            for dataset in datasets
+        ],
         dtype=float,
     )
 
     fig, ax = plt.subplots(figsize=(4.05, 2.4))
-    image = ax.imshow(matrix, aspect="auto", cmap=plt.cm.RdYlGn, vmin=0.5, vmax=1.0)
+    masked_matrix = np.ma.masked_invalid(matrix)
+    image = ax.imshow(masked_matrix, aspect="auto", cmap=plt.cm.RdYlGn, vmin=0.5, vmax=1.0)
     colorbar = fig.colorbar(image, ax=ax, fraction=0.05, pad=0.03)
     colorbar.ax.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.2f"))
     colorbar.update_ticks()
@@ -830,6 +1449,8 @@ def render_heatmap(rows, *, datasets, batch_sizes, args, paths):
     for row_index, dataset in enumerate(datasets):
         for col_index, batch_size in enumerate(batch_sizes):
             value = matrix[row_index, col_index]
+            if np.isnan(value):
+                continue
             color = "white" if value >= 0.80 else "#111111"
             ax.text(
                 col_index,
@@ -846,143 +1467,387 @@ def render_heatmap(rows, *, datasets, batch_sizes, args, paths):
     plt.close(fig)
 
 
-def load_pareto_fscore_lookup(*, args, oracle, datasets, batch_sizes):
+def load_augmented_fscore_lookup(*, args, oracle, datasets, batch_sizes):
     model_name = sanitize_label(oracle.model)
-    preferred_paths = [
+    candidate_paths = [
         Path(args.output_dir) / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
+        Path("results/plot_LLM") / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
         Path("results/batch_LLM_augmented") / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
     ]
+
     source_rows = None
-    for path in preferred_paths:
+    for path in candidate_paths:
         if path.exists():
             source_rows = load_experiment_rows(path)
             break
-
     if source_rows is None:
-        source_rows = []
-        fallback_paths = [
-            Path("results/batch_LLM") / f"experiment_batch_LLM,{model_name},few-shot,fewshot10x2,x10,seed0.csv",
-            Path("results/batch_LLM_b2") / f"experiment_batch_LLM,{model_name},few-shot,fewshot10x2,x10,seed0.csv",
-            Path("results/batch_LLM_camera_override")
-            / f"camera,b10,x10,{model_name},few-shot,fewshot30x2,seed0,camera_catalog.csv",
-        ]
-        for path in fallback_paths:
-            if path.exists():
-                source_rows.extend(load_experiment_rows(path))
+        raise RuntimeError("Combined plot requires the augmented batch-LLM CSV in results/plot_LLM or results/batch_LLM_augmented.")
 
     lookup = {}
     for row in source_rows:
         key = (row["dataset"], row["batch_size"])
         if row["dataset"] in datasets and row["batch_size"] in batch_sizes:
-            lookup[key] = row
+            lookup[key] = row["f1"]
 
-    missing = [
-        f"{dataset}:b{batch_size}"
-        for dataset in datasets
-        for batch_size in batch_sizes
-        if (dataset, batch_size) not in lookup
-    ]
-    if missing:
-        raise RuntimeError(
-            "Pareto source data is missing F-score rows for: " + ", ".join(missing[:8]) + ("..." if len(missing) > 8 else "")
-        )
     return lookup
 
 
-def render_pareto(rows, *, datasets, batch_sizes, args, paths, oracle):
+def combined_with_avg_data(rows, *, datasets, batch_sizes, args, oracle):
     lookup = build_lookup(rows)
-    fscore_lookup = load_pareto_fscore_lookup(
+    fscore_lookup = load_augmented_fscore_lookup(
         args=args,
         oracle=oracle,
         datasets=datasets,
         batch_sizes=batch_sizes,
     )
-
-    fig, ax_left = plt.subplots(figsize=(4.6, 3.0))
-    ax_right = ax_left.twinx()
-    saving_max = 1.0
-    fscore_min = 1.0
-    fscore_max = 0.0
-    dataset_handles = []
-
-    for dataset in datasets:
-        saving_values = []
-        fscore_values = []
-        for batch_size in batch_sizes:
-            token_row = lookup[(dataset, batch_size, "recursive_all_records", "p50")]
-            saving_value = float(token_row["saving_factor_vs_pairwise_edges"])
-            fscore_value = float(fscore_lookup[(dataset, batch_size)]["f1"])
-            saving_values.append(saving_value)
-            fscore_values.append(fscore_value)
-
-        dataset_line = ax_left.plot(
-            batch_sizes,
-            fscore_values,
-            color=LINE_COLORS[dataset],
-            marker=LINE_MARKERS[dataset],
-            linestyle="-",
-            alpha=0.9,
-            label=pretty_dataset_name(dataset),
-        )[0]
-        ax_right.plot(
-            batch_sizes,
-            saving_values,
-            color=LINE_COLORS[dataset],
-            marker=LINE_MARKERS[dataset],
-            linestyle="--",
-            markerfacecolor="white",
-            markeredgewidth=1.0,
-            alpha=0.9,
-        )
-
-        dataset_handles.append(dataset_line)
-        saving_max = max(saving_max, max(saving_values))
-        fscore_min = min(fscore_min, min(fscore_values))
-        fscore_max = max(fscore_max, max(fscore_values))
-
-    ax_left.set_xticks(batch_sizes)
-    ax_left.set_xlim(min(batch_sizes), max(batch_sizes))
-    ax_left.set_ylim(max(0.0, fscore_min - 0.03), min(1.01, fscore_max + 0.02))
-    ax_right.set_ylim(0.0, saving_max * 1.08)
-    ax_right.yaxis.set_major_formatter(ticker.FormatStrFormatter("%.0fx"))
-    ax_left.grid(True, which="major", axis="both")
-    ax_left.set_xlabel("Batch Size")
-    ax_left.set_ylabel("F-score")
-    ax_right.set_ylabel("Token Saving Factor w.r.t. Pairwise")
-
-    metric_handles = [
-        Line2D([0], [0], color="#333333", linestyle="-", marker="o", label="F-score"),
-        Line2D(
-            [0],
-            [0],
-            color="#333333",
-            linestyle="--",
-            marker="o",
-            markerfacecolor="white",
-            label="Saving",
-        ),
-    ]
-
-    fig.legend(
-        dataset_handles,
-        [handle.get_label() for handle in dataset_handles],
-        ncol=len(datasets),
-        loc="upper center",
-        bbox_to_anchor=(0.5, 1.03),
-        frameon=False,
-        columnspacing=1.0,
-        handletextpad=0.4,
+    cost_model = plotted_cost_model(args)
+    x_positions = np.arange(len(batch_sizes))
+    saving_matrix = np.array(
+        [
+            [
+                plotted_saving_factor(
+                    lookup[(dataset, batch_size, cost_model, "p50")],
+                    args=args,
+                )
+                for batch_size in batch_sizes
+            ]
+            for dataset in datasets
+        ],
+        dtype=float,
     )
-    ax_left.legend(
-        handles=metric_handles,
-        loc="lower right",
-        frameon=False,
+    fscore_matrix = np.array(
+        [[fscore_lookup.get((dataset, batch_size), np.nan) for batch_size in batch_sizes] for dataset in datasets],
+        dtype=float,
     )
-    fig.tight_layout()
-    fig.savefig(paths["pareto_pdf"], bbox_inches="tight")
-    fig.savefig(paths["pareto_png"], bbox_inches="tight")
+    return {
+        "x_positions": x_positions,
+        "saving_matrix": saving_matrix,
+        "saving_mean": np.mean(saving_matrix, axis=0),
+        "saving_std": np.std(saving_matrix, axis=0),
+        "fscore_matrix": fscore_matrix,
+    }
+
+
+def intro_fscore_cmap():
+    cmap = colors.LinearSegmentedColormap.from_list(
+        "intro_fscore",
+        [
+            "#f6caca",
+            "#fde6e6",
+            "#ffffff",
+        ],
+    )
+    cmap.set_bad(color="#f4f4f4")
+    return cmap
+
+
+def render_intro_tsaving(data, *, batch_sizes, args, paths):
+    x_positions = data["x_positions"]
+    saving_mean = data["saving_mean"]
+    saving_std = data["saving_std"]
+    lower_band = np.maximum(0.0, saving_mean - saving_std)
+    upper_band = saving_mean + saving_std
+
+    fig, ax = plt.subplots(figsize=(2.25, 1.2))
+    ax.fill_between(
+        x_positions,
+        lower_band,
+        upper_band,
+        color="#c7c7c7",
+        alpha=0.55,
+        linewidth=0.0,
+    )
+    ax.plot(
+        x_positions,
+        saving_mean,
+        marker="o",
+        color="#111111",
+        linewidth=1.8,
+        markersize=5.5,
+        markeredgewidth=1.0,
+        markerfacecolor="white",
+        markeredgecolor="#111111",
+    )
+    y_min = float(np.min(lower_band)) if lower_band.size else 0.0
+    y_max = max(1.05, float(np.max(upper_band)) if upper_band.size else 1.05)
+    padding = max(0.05, (y_max - y_min) * 0.08)
+    ax.set_ylim(max(0.0, y_min - padding), y_max + padding)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(saving_tick_formatter))
+    ax.grid(True, which="major", axis="both")
+    ax.set_title(saving_axis_label(args))
+    ax.set_xlabel("Batch Size")
+    ax.set_ylabel("")
+    fig.savefig(paths["intro_tsaving_pdf"], bbox_inches="tight")
+    fig.savefig(paths["intro_tsaving_png"], bbox_inches="tight")
     plt.close(fig)
 
+
+def render_intro_fscore(data, *, datasets, batch_sizes, paths):
+    fscore_matrix = data["fscore_matrix"]
+    fig, ax = plt.subplots(figsize=(2.55, 1.2))
+    cmap = intro_fscore_cmap()
+    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+    ax.imshow(np.ma.masked_invalid(fscore_matrix), aspect="auto", cmap=cmap, norm=norm)
+    ax.set_xticks(np.arange(len(batch_sizes)))
+    ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax.set_yticks(np.arange(len(datasets)))
+    ax.set_yticklabels([pretty_dataset_name(dataset) for dataset in datasets])
+    ax.set_title("F-score")
+    ax.set_xlabel("Batch Size")
+
+    for row_index in range(fscore_matrix.shape[0]):
+        for col_index in range(fscore_matrix.shape[1]):
+            value = fscore_matrix[row_index, col_index]
+            if np.isnan(value):
+                continue
+            ax.text(
+                col_index,
+                row_index,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                color="#111111",
+                fontsize=7.5,
+            )
+
+    fig.savefig(paths["intro_fscore_pdf"], bbox_inches="tight")
+    fig.savefig(paths["intro_fscore_png"], bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_combined(rows, *, datasets, batch_sizes, args, paths, oracle):
+    lookup = build_lookup(rows)
+    fscore_lookup = load_augmented_fscore_lookup(
+        args=args,
+        oracle=oracle,
+        datasets=datasets,
+        batch_sizes=batch_sizes,
+    )
+    cost_model = plotted_cost_model(args)
+
+    x_positions = np.arange(len(batch_sizes))
+    saving_series = {}
+    y_min = float("inf")
+    y_max = 1.05
+    for dataset in datasets:
+        values = np.array(
+            [
+                plotted_saving_factor(
+                    lookup[(dataset, batch_size, cost_model, "p50")],
+                    args=args,
+                )
+                for batch_size in batch_sizes
+            ],
+            dtype=float,
+        )
+        saving_series[dataset] = values
+        y_min = min(y_min, float(np.min(values)))
+        y_max = max(y_max, float(np.max(values)))
+
+    fscore_matrix = np.array(
+        [[fscore_lookup.get((dataset, batch_size), np.nan) for batch_size in batch_sizes] for dataset in datasets],
+        dtype=float,
+    )
+
+    fig, (ax_left, ax_right) = plt.subplots(
+        1,
+        2,
+        figsize=(4.1, 1.8),
+        gridspec_kw={"width_ratios": [1.3, 1.5]},
+    )
+
+    legend_handles = []
+    for dataset in datasets:
+        handle = ax_left.plot(
+            x_positions,
+            saving_series[dataset],
+            marker=LINE_MARKERS[dataset],
+            color="#111111",
+            linewidth=1.8,
+            markersize=5.5,
+            markeredgewidth=1.0,
+            markerfacecolor="white",
+            markeredgecolor="#111111",
+            label=pretty_dataset_name(dataset),
+        )[0]
+        legend_handles.append(handle)
+
+    if y_min == float("inf"):
+        y_min = 0.0
+    padding = max(0.05, (y_max - y_min) * 0.08)
+    ax_left.set_ylim(max(0.0, y_min - padding), y_max + padding)
+    ax_left.set_xticks(x_positions)
+    ax_left.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax_left.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax_left.yaxis.set_major_formatter(ticker.FuncFormatter(saving_tick_formatter))
+    ax_left.grid(True, which="major", axis="both")
+    ax_left.set_title(saving_axis_label(args))
+    ax_left.set_xlabel("Batch Size")
+    ax_left.set_ylabel("")
+
+    cmap = colors.LinearSegmentedColormap.from_list("bw_fscore", ["#d9d9d9", "#000000"])
+    cmap.set_bad(color="#f1f1f1")
+    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+    ax_right.imshow(np.ma.masked_invalid(fscore_matrix), aspect="auto", cmap=cmap, norm=norm)
+    ax_right.set_xticks(np.arange(len(batch_sizes)))
+    ax_right.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax_right.set_yticks(np.arange(len(datasets)))
+    ax_right.set_yticklabels([pretty_dataset_name(dataset) for dataset in datasets])
+    ax_right.set_title("F-score")
+    ax_right.set_xlabel("Batch Size")
+
+    for row_index in range(fscore_matrix.shape[0]):
+        for col_index in range(fscore_matrix.shape[1]):
+            value = fscore_matrix[row_index, col_index]
+            if np.isnan(value):
+                continue
+            text_color = "white" if value >= 0.82 else "#111111"
+            ax_right.text(
+                col_index,
+                row_index,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                color=text_color,
+                fontsize=7.5,
+            )
+
+    fig.legend(
+        handles=legend_handles,
+        labels=[handle.get_label() for handle in legend_handles],
+        ncol=len(legend_handles),
+        loc="lower left",
+        bbox_to_anchor=(0.12, 0.70, 0.86, 0.0),
+        mode="expand",
+        borderaxespad=0.0,
+        frameon=False,
+        columnspacing=1.0,
+        handletextpad=0.5,
+    )
+
+    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.32, top=0.62, wspace=0.32)
+    left_pos = ax_left.get_position()
+    right_pos = ax_right.get_position()
+    fig.text(
+        (left_pos.x0 + left_pos.x1) / 2,
+        0.02,
+        "(a)",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold",
+    )
+    fig.text((right_pos.x0 + right_pos.x1) / 2, 0.02, "(b)", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    fig.savefig(paths["combined_pdf"], bbox_inches="tight")
+    fig.savefig(paths["combined_png"], bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_combined_with_avg(rows, *, datasets, batch_sizes, args, paths, oracle):
+    data = combined_with_avg_data(
+        rows,
+        datasets=datasets,
+        batch_sizes=batch_sizes,
+        args=args,
+        oracle=oracle,
+    )
+    x_positions = data["x_positions"]
+    saving_mean = data["saving_mean"]
+    saving_std = data["saving_std"]
+    lower_band = np.maximum(0.0, saving_mean - saving_std)
+    upper_band = saving_mean + saving_std
+    fscore_matrix = data["fscore_matrix"]
+
+    fig, (ax_left, ax_right) = plt.subplots(
+        1,
+        2,
+        figsize=(4.1, 1.8),
+        gridspec_kw={"width_ratios": [1.3, 1.5]},
+    )
+
+    ax_left.fill_between(
+        x_positions,
+        lower_band,
+        upper_band,
+        color="#c7c7c7",
+        alpha=0.55,
+        linewidth=0.0,
+        label="±1 std.",
+    )
+    ax_left.plot(
+        x_positions,
+        saving_mean,
+        marker="o",
+        color="#111111",
+        linewidth=1.8,
+        markersize=5.5,
+        markeredgewidth=1.0,
+        markerfacecolor="white",
+        markeredgecolor="#111111",
+        label="Avg.",
+    )
+
+    y_min = float(np.min(lower_band)) if lower_band.size else 0.0
+    y_max = max(1.05, float(np.max(upper_band)) if upper_band.size else 1.05)
+    padding = max(0.05, (y_max - y_min) * 0.08)
+    ax_left.set_ylim(max(0.0, y_min - padding), y_max + padding)
+    ax_left.set_xticks(x_positions)
+    ax_left.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax_left.yaxis.set_major_locator(ticker.MaxNLocator(nbins=5))
+    ax_left.yaxis.set_major_formatter(ticker.FuncFormatter(saving_tick_formatter))
+    ax_left.grid(True, which="major", axis="both")
+    ax_left.set_title(saving_axis_label(args))
+    ax_left.set_xlabel("Batch Size")
+    ax_left.set_ylabel("")
+
+    cmap = colors.LinearSegmentedColormap.from_list("bw_fscore", ["#d9d9d9", "#000000"])
+    cmap.set_bad(color="#f1f1f1")
+    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+    ax_right.imshow(np.ma.masked_invalid(fscore_matrix), aspect="auto", cmap=cmap, norm=norm)
+    ax_right.set_xticks(np.arange(len(batch_sizes)))
+    ax_right.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax_right.set_yticks(np.arange(len(datasets)))
+    ax_right.set_yticklabels([pretty_dataset_name(dataset) for dataset in datasets])
+    ax_right.set_title("F-score")
+    ax_right.set_xlabel("Batch Size")
+
+    for row_index in range(fscore_matrix.shape[0]):
+        for col_index in range(fscore_matrix.shape[1]):
+            value = fscore_matrix[row_index, col_index]
+            if np.isnan(value):
+                continue
+            text_color = "white" if value >= 0.82 else "#111111"
+            ax_right.text(
+                col_index,
+                row_index,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                color=text_color,
+                fontsize=7.5,
+            )
+
+    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.32, top=0.62, wspace=0.32)
+    left_pos = ax_left.get_position()
+    right_pos = ax_right.get_position()
+    fig.text(
+        (left_pos.x0 + left_pos.x1) / 2,
+        0.02,
+        "(a)",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        fontweight="bold",
+    )
+    fig.text((right_pos.x0 + right_pos.x1) / 2, 0.02, "(b)", ha="center", va="bottom", fontsize=10, fontweight="bold")
+    fig.savefig(paths["combined_with_avg_pdf"], bbox_inches="tight")
+    fig.savefig(paths["combined_with_avg_png"], bbox_inches="tight")
+    plt.close(fig)
+    render_intro_tsaving(data, batch_sizes=batch_sizes, args=args, paths=paths)
+    render_intro_fscore(data, datasets=datasets, batch_sizes=batch_sizes, paths=paths)
 
 def render_plots(rows, *, datasets, batch_sizes, args, paths, oracle):
     apply_publication_style()
@@ -991,19 +1856,29 @@ def render_plots(rows, *, datasets, batch_sizes, args, paths, oracle):
         render_overview(rows, datasets=datasets, batch_sizes=batch_sizes, args=args, paths=paths)
     if "heatmap" in args.plot_modes:
         render_heatmap(rows, datasets=datasets, batch_sizes=batch_sizes, args=args, paths=paths)
-    if "pareto" in args.plot_modes:
-        render_pareto(rows, datasets=datasets, batch_sizes=batch_sizes, args=args, paths=paths, oracle=oracle)
+    if "combined" in args.plot_modes:
+        render_combined(rows, datasets=datasets, batch_sizes=batch_sizes, args=args, paths=paths, oracle=oracle)
+    if "combined_with_avg" in args.plot_modes:
+        render_combined_with_avg(rows, datasets=datasets, batch_sizes=batch_sizes, args=args, paths=paths, oracle=oracle)
 
 
 def matching_config(payload: dict[str, object], *, args, oracle, datasets, batch_sizes) -> bool:
     config = payload.get("config", {})
+    saved_batch_sizes = config.get("batch_sizes")
+    batch_sizes_match = saved_batch_sizes == batch_sizes
+    if not batch_sizes_match and isinstance(saved_batch_sizes, list):
+        batch_sizes_match = all(batch_size in saved_batch_sizes for batch_size in batch_sizes)
     return (
         config.get("datasets") == datasets
-        and config.get("batch_sizes") == batch_sizes
+        and batch_sizes_match
         and config.get("prompt_mode") == args.prompt_mode
         and config.get("few_shot_pairs_per_class") == args.few_shot_pairs_per_class
+        and config.get("few_shot_positive_pairs") == args.few_shot_positive_pairs
+        and config.get("few_shot_negative_pairs") == args.few_shot_negative_pairs
         and config.get("openai_model") == oracle.model
         and config.get("token_source_mode") == args.token_source
+        and config.get("estimation_model_version") == ESTIMATION_MODEL_VERSION
+        and config.get("phi_fingerprint") == args.phi_fingerprint
         and config.get("seed") == args.seed
     )
 
@@ -1040,7 +1915,10 @@ def resolve_reusable_csv_path(paths: dict[str, Path], *, args, oracle, datasets,
 def main():
     args = parse_args()
     datasets = resolve_datasets(args.datasets)
-    batch_sizes = sorted(set(args.batch_sizes))
+    phi_payload = load_phi_payload(args.phi_json)
+    phi_config = resolve_phi_config(phi_payload, datasets)
+    batch_sizes = resolve_batch_sizes(args, phi_config, datasets)
+    args.phi_fingerprint = phi_fingerprint(phi_config, datasets)
     oracle = create_oracle(args)
     paths = build_output_paths(args, oracle.model)
 
@@ -1060,7 +1938,7 @@ def main():
         all_rows = []
         for dataset in datasets:
             state = build_dataset_state(dataset)
-            all_rows.extend(build_rows_for_dataset(state, oracle, args))
+            all_rows.extend(build_rows_for_dataset(state, oracle, args, phi_config[dataset], batch_sizes))
 
         normalized_rows = add_saving_factor_fields(all_rows, baseline_batch_size=2)
         sorted_rows = sort_rows(normalized_rows, datasets, batch_sizes)
@@ -1092,9 +1970,14 @@ def main():
                 f"Saved heatmap plot to {paths['heatmap_pdf']} and {paths['heatmap_png']}.",
                 flush=True,
             )
-        if mode == "pareto":
+        if mode == "combined":
             print(
-                f"Saved pareto plot to {paths['pareto_pdf']} and {paths['pareto_png']}.",
+                f"Saved combined plot to {paths['combined_pdf']} and {paths['combined_png']}.",
+                flush=True,
+            )
+        if mode == "combined_with_avg":
+            print(
+                f"Saved combined-with-avg plot to {paths['combined_with_avg_pdf']} and {paths['combined_with_avg_png']}.",
                 flush=True,
             )
 

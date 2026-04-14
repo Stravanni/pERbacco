@@ -346,16 +346,37 @@ def render_heatmap(
     png_path: Path,
     title_text: str | None = None,
     footer_text: str | None = None,
+    saving_lookup: dict[tuple[str, int], float] | None = None,
 ) -> None:
     matrix = f1_matrix(records, datasets, batch_sizes)[: len(datasets), :]
     labels = datasets
 
-    cmap = plt.cm.RdYlGn.copy()
-    cmap.set_bad(color="#f1f1f1")
-    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+    if saving_lookup is not None:
+        saving_matrix = np.full((len(datasets), len(batch_sizes)), np.nan)
+        for row_index, dataset in enumerate(datasets):
+            for col_index, batch_size in enumerate(batch_sizes):
+                saving_matrix[row_index, col_index] = saving_lookup.get((dataset, batch_size), np.nan)
+        cmap = colors.LinearSegmentedColormap.from_list("saving_blues", ["#ffffff", "#08306B"])
+        cmap.set_bad(color="#f1f1f1")
+        valid_values = saving_matrix[np.isfinite(saving_matrix)]
+        if valid_values.size == 0:
+            norm = colors.Normalize(vmin=1.0, vmax=1.0)
+        else:
+            vmin = max(1.0, float(np.nanmin(valid_values)))
+            vmax = float(np.nanmax(valid_values))
+            if vmax <= vmin:
+                norm = colors.Normalize(vmin=vmin, vmax=vmin + 1e-9)
+            else:
+                norm = colors.LogNorm(vmin=vmin, vmax=vmax)
+        color_matrix = saving_matrix
+    else:
+        cmap = plt.cm.RdYlGn.copy()
+        cmap.set_bad(color="#f1f1f1")
+        norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+        color_matrix = matrix
 
     fig, ax = plt.subplots(figsize=(4.05, 2.4))
-    image = ax.imshow(np.ma.masked_invalid(matrix), aspect="auto", cmap=cmap, norm=norm)
+    image = ax.imshow(np.ma.masked_invalid(color_matrix), aspect="auto", cmap=cmap, norm=norm)
 
     ax.set_xticks(np.arange(len(batch_sizes)))
     ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
@@ -371,8 +392,17 @@ def render_heatmap(
                 text = "pending"
                 color = "#666666"
             else:
-                text = f"{value:.3f}"
-                color = "white" if value >= 0.8 else "#1f1f1f"
+                if saving_lookup is not None:
+                    saving_value = color_matrix[row_index, col_index]
+                    if saving_value >= 10:
+                        saving_text = f"{saving_value:.0f}x"
+                    else:
+                        saving_text = f"{saving_value:.1f}x"
+                    text = f"{value:.3f}\n({saving_text})"
+                    color = "white" if float(norm(saving_value)) >= 0.55 else "#1f1f1f"
+                else:
+                    text = f"{value:.3f}"
+                    color = "white" if value >= 0.8 else "#1f1f1f"
             ax.text(col_index, row_index, text, ha="center", va="center", color=color, fontsize=8)
 
     fig.tight_layout()
