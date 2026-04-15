@@ -357,6 +357,8 @@ def build_output_paths(args, model_name: str) -> dict[str, Path]:
         "intro_tsaving_png": output_dir / f"{stem}_intro_tsaving.png",
         "intro_fscore_pdf": output_dir / f"{stem}_intro_fscore.pdf",
         "intro_fscore_png": output_dir / f"{stem}_intro_fscore.png",
+        "intro_accuracy_pdf": output_dir / f"{stem}_intro_accuracy.pdf",
+        "intro_accuracy_png": output_dir / f"{stem}_intro_accuracy.png",
         "legacy_csv": legacy_output_dir / f"{stem}.csv",
         "legacy_json": legacy_output_dir / f"{stem}.json",
         "legacy_plot_paths": [
@@ -1100,14 +1102,20 @@ def load_experiment_rows(path: Path):
     rows = []
     with path.open(newline="") as handle:
         for row in csv.DictReader(handle):
-            rows.append(
-                {
-                    "dataset": row["dataset"],
-                    "batch_size": int(row["batch_size"]),
-                    "f1": float(row["f1"]),
-                    "llm_total_tokens": int(float(row["llm_total_tokens"])),
-                }
-            )
+            normalized = dict(row)
+            normalized["dataset"] = row["dataset"]
+            normalized["batch_size"] = int(row["batch_size"])
+            normalized["f1"] = float(row["f1"])
+            normalized["llm_total_tokens"] = int(float(row["llm_total_tokens"]))
+            for field in [
+                "queried_pair_events",
+                "gt_duplicate_pairs",
+                "correctly_identified_duplicate_pairs",
+                "predicted_positive_pairs",
+            ]:
+                if field in row and row[field] not in ("", None):
+                    normalized[field] = int(float(row[field]))
+            rows.append(normalized)
     return rows
 
 
@@ -1265,6 +1273,10 @@ def write_summary_json(path: Path, *, args, oracle, datasets, batch_sizes, rows,
             "pdf": str(paths["intro_fscore_pdf"]),
             "png": str(paths["intro_fscore_png"]),
         }
+        plot_paths["intro_accuracy"] = {
+            "pdf": str(paths["intro_accuracy_pdf"]),
+            "png": str(paths["intro_accuracy_png"]),
+        }
 
     payload = {
         "config": {
@@ -1340,6 +1352,8 @@ def cleanup_legacy_plots(paths):
         paths["intro_tsaving_png"],
         paths["intro_fscore_pdf"],
         paths["intro_fscore_png"],
+        paths["intro_accuracy_pdf"],
+        paths["intro_accuracy_png"],
     ]
     for plot_path in removable:
         if plot_path.exists():
@@ -1492,6 +1506,29 @@ def load_augmented_fscore_lookup(*, args, oracle, datasets, batch_sizes):
     return lookup
 
 
+def load_augmented_metric_rows(*, args, oracle, datasets, batch_sizes):
+    model_name = sanitize_label(oracle.model)
+    candidate_paths = [
+        Path(args.output_dir) / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
+        Path("results/plot_LLM") / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
+        Path("results/batch_LLM_augmented") / f"experiment_batch_LLM,{model_name},augmented-camera30,b2,seed0.csv",
+    ]
+    source_rows = None
+    for path in candidate_paths:
+        if path.exists():
+            source_rows = load_experiment_rows(path)
+            break
+    if source_rows is None:
+        raise RuntimeError("Combined plot requires the augmented batch-LLM CSV in results/plot_LLM or results/batch_LLM_augmented.")
+
+    full_rows = {}
+    for row in source_rows:
+        key = (row["dataset"], row["batch_size"])
+        if row["dataset"] in datasets and row["batch_size"] in batch_sizes:
+            full_rows[key] = row
+    return full_rows
+
+
 def combined_with_avg_data(rows, *, datasets, batch_sizes, args, oracle):
     lookup = build_lookup(rows)
     fscore_lookup = load_augmented_fscore_lookup(
@@ -1526,6 +1563,19 @@ def combined_with_avg_data(rows, *, datasets, batch_sizes, args, oracle):
         "saving_std": np.std(saving_matrix, axis=0),
         "fscore_matrix": fscore_matrix,
     }
+
+
+def accuracy_from_experiment_row(row: dict[str, object]) -> float:
+    queried = int(float(row["queried_pair_events"]))
+    gt_duplicates = int(float(row["gt_duplicate_pairs"]))
+    tp = int(float(row["correctly_identified_duplicate_pairs"]))
+    predicted_positive = int(float(row["predicted_positive_pairs"]))
+    fn = gt_duplicates - tp
+    fp = predicted_positive - tp
+    tn = queried - tp - fn - fp
+    if queried <= 0:
+        return float("nan")
+    return (tp + tn) / queried
 
 
 def intro_fscore_cmap():
@@ -1595,7 +1645,7 @@ def render_intro_fscore(data, *, datasets, batch_sizes, paths):
     ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
     ax.set_yticks(np.arange(len(datasets)))
     ax.set_yticklabels([pretty_dataset_name(dataset) for dataset in datasets])
-    ax.set_title("F-score")
+    ax.set_title("Matching detection F-score")
     ax.set_xlabel("Batch Size")
 
     for row_index in range(fscore_matrix.shape[0]):
@@ -1615,6 +1665,56 @@ def render_intro_fscore(data, *, datasets, batch_sizes, paths):
 
     fig.savefig(paths["intro_fscore_pdf"], bbox_inches="tight")
     fig.savefig(paths["intro_fscore_png"], bbox_inches="tight")
+    plt.close(fig)
+
+
+def render_intro_accuracy(*, args, oracle, datasets, batch_sizes, paths):
+    metric_rows = load_augmented_metric_rows(
+        args=args,
+        oracle=oracle,
+        datasets=datasets,
+        batch_sizes=batch_sizes,
+    )
+    accuracy_matrix = np.array(
+        [
+            [
+                accuracy_from_experiment_row(metric_rows[(dataset, batch_size)])
+                if (dataset, batch_size) in metric_rows
+                else np.nan
+                for batch_size in batch_sizes
+            ]
+            for dataset in datasets
+        ],
+        dtype=float,
+    )
+    fig, ax = plt.subplots(figsize=(2.55, 1.2))
+    cmap = intro_fscore_cmap()
+    norm = colors.Normalize(vmin=0.5, vmax=1.0, clip=True)
+    ax.imshow(np.ma.masked_invalid(accuracy_matrix), aspect="auto", cmap=cmap, norm=norm)
+    ax.set_xticks(np.arange(len(batch_sizes)))
+    ax.set_xticklabels([str(batch_size) for batch_size in batch_sizes])
+    ax.set_yticks(np.arange(len(datasets)))
+    ax.set_yticklabels([pretty_dataset_name(dataset) for dataset in datasets])
+    ax.set_title("Matching detection Accuracy")
+    ax.set_xlabel("Batch Size")
+
+    for row_index in range(accuracy_matrix.shape[0]):
+        for col_index in range(accuracy_matrix.shape[1]):
+            value = accuracy_matrix[row_index, col_index]
+            if np.isnan(value):
+                continue
+            ax.text(
+                col_index,
+                row_index,
+                f"{value:.2f}",
+                ha="center",
+                va="center",
+                color="#111111",
+                fontsize=7.5,
+            )
+
+    fig.savefig(paths["intro_accuracy_pdf"], bbox_inches="tight")
+    fig.savefig(paths["intro_accuracy_png"], bbox_inches="tight")
     plt.close(fig)
 
 
@@ -1848,6 +1948,7 @@ def render_combined_with_avg(rows, *, datasets, batch_sizes, args, paths, oracle
     plt.close(fig)
     render_intro_tsaving(data, batch_sizes=batch_sizes, args=args, paths=paths)
     render_intro_fscore(data, datasets=datasets, batch_sizes=batch_sizes, paths=paths)
+    render_intro_accuracy(args=args, oracle=oracle, datasets=datasets, batch_sizes=batch_sizes, paths=paths)
 
 def render_plots(rows, *, datasets, batch_sizes, args, paths, oracle):
     apply_publication_style()

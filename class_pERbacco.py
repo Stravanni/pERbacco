@@ -251,6 +251,7 @@ class class_entity:
         oracle_backend="groundtruth",
         openai_model=None,
         prompt_mode="zero-shot",
+        few_shot_pairs_per_class=None,
     ):
 
         #graph_copy = copy.deepcopy(graph)
@@ -267,7 +268,17 @@ class class_entity:
         self.oracle_backend = oracle_backend
         self.openai_model = openai_model
         self.prompt_mode = prompt_mode
+        self.few_shot_pairs_per_class = few_shot_pairs_per_class
         self.record_index = read_dataset_records(dname)
+        self.field_names = []
+        if self.record_index:
+            sample_record = next(iter(self.record_index.values()))
+            self.field_names = [column for column in sample_record.keys() if column != "id"]
+        self.prompt_profile = None
+        if self.record_index:
+            from batch_simple_LLM import infer_prompt_profile
+
+            self.prompt_profile = infer_prompt_profile(self.dname, self.field_names)
         self.oracle_client = None
         self.last_query_stats = self.empty_query_stats()
 
@@ -334,6 +345,12 @@ class class_entity:
             "response_id": "",
         }
 
+    def member_ids_for_entity(self, entity_id):
+        entity = self.dict_entity.get(entity_id)
+        if entity is None:
+            return {entity_id}
+        return set(entity["set_entity"])
+
     def lookup_record(self, record_id):
         normalized = normalize_identifier(record_id)
         record = self.record_index.get(normalized)
@@ -388,41 +405,82 @@ class class_entity:
         return summary
 
     def build_oracle_entity_payload(self, entity_id):
+        from batch_simple_LLM import build_generic_entity_payload, record_without_id
+
         entity = self.dict_entity.get(entity_id)
         if entity is None:
-            member_ids = [entity_id]
-        else:
-            member_ids = sorted(entity["set_entity"])
+            payload = build_generic_entity_payload(entity_id, self.record_index, self.prompt_profile)
+            payload["entity_id"] = str(entity_id)
+            return payload
 
+        member_ids = sorted(entity["set_entity"])
         records = []
-        title_variants = set()
-        author_last_names = set()
-        year_values = set()
-        page_signatures = set()
-        venue_signatures = set()
         for member_id in member_ids[:5]:
             record = self.lookup_record(member_id).copy()
             record["id"] = str(record.get("id", member_id))
-            summary = self.summarize_record_for_oracle(record)
-            records.append(summary)
-            title_variants.add(" ".join(summary["normalized_title_tokens"]))
-            author_last_names.update(summary["author_last_names"])
-            if summary["year_signature"]:
-                year_values.add(summary["year_signature"])
-            if summary["page_signature"]:
-                page_signatures.add(summary["page_signature"])
-            venue_signatures.add(" ".join(summary["venue_tokens"]))
+            records.append(record_without_id(record))
 
         return {
             "entity_id": str(entity_id),
             "entity_size": len(member_ids),
-            "normalized_title_variants": sorted(value for value in title_variants if value)[:5],
-            "author_last_names_union": sorted(author_last_names)[:12],
-            "year_signatures": sorted(year_values),
-            "page_signatures": sorted(page_signatures),
-            "venue_signatures": sorted(value for value in venue_signatures if value)[:5],
             "records": records,
         }
+
+    def build_query_few_shot_examples(self, query_entity_ids):
+        if self.prompt_mode != "few-shot" or self.few_shot_pairs_per_class is None:
+            return None
+
+        from batch_simple_LLM import (
+            build_few_shot_examples,
+            mine_negative_examples,
+            mine_positive_examples,
+        )
+
+        count = int(self.few_shot_pairs_per_class)
+        if count <= 0:
+            return []
+
+        excluded_nodes = set()
+        for entity_id in query_entity_ids:
+            excluded_nodes.update(self.member_ids_for_entity(entity_id))
+
+        ground_truth_pairs = {
+            frozenset((normalize_identifier(row.iloc[0]), normalize_identifier(row.iloc[1])))
+            for _, row in self.df_ground_truth.iterrows()
+            if normalize_identifier(row.iloc[0]) != normalize_identifier(row.iloc[1])
+        }
+        seed_value = "|".join(
+            [
+                self.dname,
+                str(self.batch_size),
+                str(count),
+                ",".join(str(entity_id) for entity_id in query_entity_ids),
+            ]
+        )
+        rng = random.Random(seed_value)
+        positive_pairs = mine_positive_examples(
+            ground_truth_pairs,
+            excluded_nodes,
+            count,
+            rng,
+            prompt_profile=self.prompt_profile,
+            records_by_id=self.record_index,
+        )
+        negative_pairs = mine_negative_examples(
+            self.graph,
+            self.dict_ground_truth,
+            excluded_nodes,
+            count,
+            rng,
+            prompt_profile=self.prompt_profile,
+            records_by_id=self.record_index,
+        )
+        return build_few_shot_examples(
+            self.record_index,
+            positive_pairs,
+            negative_pairs,
+            self.prompt_profile,
+        )
 
     def _resolve_query_matches(self, set_query):
         self.last_query_stats = self.empty_query_stats()
@@ -436,8 +494,16 @@ class class_entity:
         normalized_query = sorted(set(set_query))
         entities = [self.build_oracle_entity_payload(entity_id) for entity_id in normalized_query]
         id_lookup = {str(entity_id): entity_id for entity_id in normalized_query}
+        few_shot_examples = self.build_query_few_shot_examples(normalized_query)
 
-        response = self.oracle_client.resolve_batch(entities)
+        response = self.oracle_client.resolve_batch(
+            entities,
+            prompt_profile=self.prompt_profile,
+            dataset_name=self.dname,
+            field_names=self.field_names,
+            few_shot_examples=few_shot_examples,
+            prompt_mode=self.prompt_mode,
+        )
         self.last_query_stats = {
             **self.empty_query_stats(),
             **response["usage"],
@@ -513,7 +579,15 @@ class class_entity:
             start = max(0, min(index - batch_size // 2, len(scored_nodes) - batch_size))
             selection = [node for _, node in scored_nodes[start : start + batch_size]]
             entities = [self.build_oracle_entity_payload(node) for node in selection]
-            estimates[label] = self.oracle_client.estimate_batch_tokens(entities)
+            few_shot_examples = self.build_query_few_shot_examples(selection)
+            estimates[label] = self.oracle_client.estimate_batch_tokens(
+                entities,
+                prompt_profile=self.prompt_profile,
+                dataset_name=self.dname,
+                field_names=self.field_names,
+                few_shot_examples=few_shot_examples,
+                prompt_mode=self.prompt_mode,
+            )
 
         return estimates
 
@@ -1317,5 +1391,3 @@ class class_entity:
         G_ig.es['weight'] = weights
 
         self.igraph = G_ig
-
-

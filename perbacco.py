@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument("--oracle_backend", type=str, choices=["groundtruth", "openai"], default="groundtruth")
     parser.add_argument("--openai_model", type=str, default=None)
     parser.add_argument("--prompt_mode", type=str, choices=["zero-shot", "few-shot"], default="zero-shot")
+    parser.add_argument("--few-shot-pairs-per-class", type=int, default=None)
     parser.add_argument("--max_llm_calls", type=int, default=None)
     parser.add_argument("--skip-batches", type=int, default=0)
     return parser.parse_args()
@@ -92,6 +93,7 @@ def build_output_path(
     oracle_backend="groundtruth",
     openai_model=None,
     prompt_mode="zero-shot",
+    few_shot_pairs_per_class=None,
     max_llm_calls=None,
     skip_batches=0,
 ):
@@ -107,6 +109,8 @@ def build_output_path(
         if alg_community != "False":
             parts.extend([alg_community[:3], str(lambda_w)])
         parts.extend([sanitize_label(openai_model or "default"), prompt_mode])
+        if prompt_mode == "few-shot" and few_shot_pairs_per_class is not None:
+            parts.append(f"fewshot{few_shot_pairs_per_class}x2")
         if max_llm_calls is not None:
             parts.append(f"cap{max_llm_calls}")
         if skip_batches > 0:
@@ -361,6 +365,8 @@ def main():
         raise SystemExit("--max_llm_calls must be positive when provided.")
     if args.skip_batches < 0:
         raise SystemExit("--skip-batches must be non-negative.")
+    if args.few_shot_pairs_per_class is not None and args.few_shot_pairs_per_class <= 0:
+        raise SystemExit("--few-shot-pairs-per-class must be positive when provided.")
 
     lambda_w = args.lambda_w
     if lambda_w != "False":
@@ -404,6 +410,7 @@ def main():
         oracle_backend=args.oracle_backend,
         openai_model=args.openai_model,
         prompt_mode=args.prompt_mode,
+        few_shot_pairs_per_class=args.few_shot_pairs_per_class,
     )
 
     perbacco.create_list_community()
@@ -420,6 +427,7 @@ def main():
             oracle_backend="groundtruth",
             openai_model=args.openai_model,
             prompt_mode=args.prompt_mode,
+            few_shot_pairs_per_class=args.few_shot_pairs_per_class,
         )
     if args.oracle_backend == "openai":
         print_llm_estimate(perbacco, args, effective_max_query)
@@ -655,6 +663,7 @@ def main():
         oracle_backend=args.oracle_backend,
         openai_model=args.openai_model,
         prompt_mode=args.prompt_mode,
+        few_shot_pairs_per_class=args.few_shot_pairs_per_class if args.oracle_backend == "openai" else None,
         max_llm_calls=args.max_llm_calls if args.oracle_backend == "openai" else None,
         skip_batches=args.skip_batches,
     )
