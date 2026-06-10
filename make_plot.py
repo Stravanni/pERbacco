@@ -5,8 +5,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from argparse import ArgumentParser
 
-
-
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument('--dataset', type=str, choices=["cora", "camera", "funding", "voters", "cddb", "restaurant", "wdc20", "wdc50", "wdc80", "census", "synth_250", "synth_1000", "synth_5000", "synth_10000"])
