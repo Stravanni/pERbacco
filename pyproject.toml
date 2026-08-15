@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "perbacco"
+version = "0.1.0"
+description = "Dependency-light next-best-batch scheduling for entity resolution"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
+authors = [{name = "pERbacco authors"}]
+dependencies = []
+classifiers = [
+  "Programming Language :: C",
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+]
+
+[project.optional-dependencies]
+data = ["pyarrow>=14"]
+plot = ["matplotlib>=3.8"]
+leiden = ["python-igraph>=0.11", "leidenalg>=0.10"]
+dev = ["ruff>=0.6"]
+
+[project.scripts]
+perbacco = "perbacco.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["class_pERbacco.py", "docs"]

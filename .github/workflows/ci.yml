@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        python: ["3.10", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Strict C and Python tests
+        run: make test
+      - name: Address and undefined behavior sanitizers
+        run: make sanitize
+      - name: Build and install wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+          python -m pip install --force-reinstall dist/*.whl
+          cd /tmp
+          python -c "import perbacco; print(perbacco.__version__)"
