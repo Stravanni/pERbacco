@@ -1,131 +1,63 @@
-# Entity Resolution via Batched Oracle Queries
+# pERbacco
 
-This repository contains the source code accompanying the paper:
+[![CI](https://github.com/Stravanni/pERbacco/actions/workflows/ci.yml/badge.svg)](https://github.com/Stravanni/pERbacco/actions/workflows/ci.yml)
+[![Docs](https://github.com/Stravanni/pERbacco/actions/workflows/docs.yml/badge.svg)](https://stravanni.github.io/pERbacco/)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-9e2a2b)](LICENSE)
 
-**Entity Resolution via Batched Oracle Queries**
+pERbacco chooses the next bounded batch of records to send to an entity-resolution
+oracle. The maintained implementation is a dependency-free C99 engine with a
+zero-runtime-dependency Python wrapper and four selectable schedulers: pERbacco,
+pERbac, Online, and the ground-truth-only SubOpt baseline.
 
-The code supports the experimental evaluation presented in the paper and allows reproducing the reported results.
+## Install
 
----
-
-## Contents
-
-The repository includes implementations of the proposed and baseline algorithms, as well as scripts for computing theoretical bounds used in the analysis.
-
----
-
-## Computing Bounds on Φ
-
-To compute the upper and lower bounds of the function Φ defined in Equation (3) of the paper, for all datasets reported in Table 2, run:
+A C99 compiler and Python 3.10+ are required. From a checkout:
 
 ```bash
-python compute_bounds_phi.py
+python -m pip install .
 ```
 
----
-
-## Running Batched Entity Resolution Algorithms
-
-To run the batched entity resolution algorithms **pERbacco**, **pERbac**, and **Online** on a given dataset with batch size equal to 10, execute:
+Experiment-only dependencies remain optional:
 
 ```bash
-python multiple_pERbacco.py --dataset datasetname
+python -m pip install '.[data,plot,leiden]'
 ```
 
-where `datasetname` specifies the target dataset.
+## Five-minute example
 
-**Note:** For `datasetname = "cora"` it should take a few minutes.
-
----
-
-## Running Experiments on All Datasets
-
-To apply **pERbacco**, **pERbac**, and **Online** to all datasets reported in Table 2 with batch size equal to 10, run:
+The executable quickstart builds a similarity graph, runs pERbacco with a local
+ground-truth oracle, and reports recall without making a network request:
 
 ```bash
-python multiple_pERbacco.py --dataset all
+python examples/python/quickstart.py
 ```
 
-**Note:** This experiment is computationally expensive and not parallelized. Running it may take several days.
+```python
+from perbacco import Engine, EngineConfig, Graph, GroundTruthOracle, run
 
----
+truth = {"a": "alice", "a-2": "alice", "b": "bob"}
+graph = Graph.from_edges([("a", "a-2", 0.96), ("a", "b", 0.08)])
 
-## Running Individual Algorithms
+with Engine(graph, EngineConfig(batch_size=3)) as engine:
+    result = run(engine, GroundTruthOracle(truth), total_truth_matches=1)
 
-The script `perbacco.py` allows running individual algorithms with fine-grained control over parameters.
-
-### pERbac
-
-To run **pERbac** on a given dataset with batch size `batch_size`, execute:
-
-```bash
-python perbacco.py \
-  --dataset datasetname \
-  --batch_size batch_size \
-  --alg_community "False" \
-  --lambda_w "False" \
-  --mu_benefit "brmean" \
-  --optimal "False" \
-  --synth_precision "False"
+print(result.stats.query_count, result.events[-1].recall)
 ```
 
-### Online
+See the [installation and first-run guide](https://stravanni.github.io/pERbacco/getting-started/),
+[Python reference](https://stravanni.github.io/pERbacco/reference/python/), and
+[C reference](https://stravanni.github.io/pERbacco/reference/c/). The public C
+header is [`include/perbacco.h`](include/perbacco.h).
 
-To run **Online** on a given dataset with batch size `batch_size`, execute:
+## Research status
 
-```bash
-python perbacco.py \
-  --dataset datasetname \
-  --batch_size batch_size \
-  --alg_community "False" \
-  --lambda_w "False" \
-  --mu_benefit "brmax" \
-  --optimal "False" \
-  --synth_precision "False"
-```
+The project accompanies [*Entity Resolution via Batched Oracle
+Queries*](https://arxiv.org/abs/2606.24407). Table III is reproduced exactly.
+The current Figure 4 artifacts are **maintained C implementation results**, not
+an exact reproduction of the published Python/NetworkX curves. The measured
+differences and corrected prototype behaviors are documented in the
+[research-status page](https://stravanni.github.io/pERbacco/research-status/).
 
-### pERbacco (Proposed Method)
-
-To run **pERbacco** with the parameter configuration described in the paper, execute:
-
-```bash
-python perbacco.py \
-  --dataset datasetname \
-  --batch_size batch_size \
-  --alg_community "louvain" \
-  --lambda_w "0.05" \
-  --mu_benefit "brmean" \
-  --optimal "False" \
-  --synth_precision "False"
-```
-
-### Suboptimal
-
-To run **SubOptimal** with batch size `batch_size`, execute:
-
-```bash
-python perbacco.py \
-  --dataset datasetname \
-  --batch_size batch_size \
-  --alg_community "False" \
-  --lambda_w "False" \
-  --mu_benefit "brmax" \
-  --optimal "True" \
-  --synth_precision "False"
-```
-
----
-
-## Plot Generation
-
-To generate the plots corresponding to Figure 3 and Figure 4 of the paper for a given dataset and batch size, run:
-
-```bash
-python make_plot.py --dataset datasetname --batch_size batch_size
-```
-
----
-
-## Reproducibility
-
-All experiments reported in the paper can be reproduced using the scripts provided in this repository with the same parameter settings described in the experimental evaluation section.
+The original Python scripts remain as research-history references. New library
+work targets the C engine and `python/perbacco` package. Licensed under
+[BSD-3-Clause](LICENSE).

@@ -1,0 +1,119 @@
+site_name: pERbacco
+site_description: Dependency-light next-best-batch scheduling for entity resolution
+site_url: https://stravanni.github.io/pERbacco/
+repo_url: https://github.com/Stravanni/pERbacco
+repo_name: Stravanni/pERbacco
+edit_uri: edit/main/docs/
+copyright: Copyright &copy; pERbacco contributors · BSD-3-Clause
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  font: false
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.action.edit
+    - content.action.view
+    - content.tooltips
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: perbacco-light
+      toggle:
+        icon: material/weather-night
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: perbacco-dark
+      toggle:
+        icon: material/weather-sunny
+        name: Use light mode
+
+nav:
+  - Home: index.md
+  - Get started:
+      - Installation and first run: getting-started.md
+      - Core concepts: concepts.md
+  - Python:
+      - Guide: python-guide.md
+      - API reference: reference/python.md
+  - C:
+      - Guide: c-guide.md
+      - API reference: reference/c.md
+  - Oracle integration: oracles.md
+  - Experiments: experiments.md
+  - Research:
+      - Status and paper mapping: research-status.md
+      - Known deviations: deviations.md
+      - Related work: related-work.md
+  - Development:
+      - Contributing and verification: development.md
+      - Architecture: architecture.md
+      - Verification record: verification.md
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [python]
+          options:
+            docstring_style: google
+            filters: ["!^_"]
+            heading_level: 2
+            members_order: source
+            merge_init_into_class: true
+            separate_signature: true
+            show_bases: true
+            show_if_no_docstring: false
+            show_root_full_path: false
+            show_signature_annotations: true
+            show_source: true
+            signature_crossrefs: true
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_css:
+  - stylesheets/extra.css
+
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: warn
+    anchors: warn
+    absolute_links: relative_to_docs
+    unrecognized_links: warn

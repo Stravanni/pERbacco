@@ -1,0 +1,9 @@
+include LICENSE Makefile README.md
+include plan.md
+include mkdocs.yml requirements-docs.txt
+recursive-include include *.h
+recursive-include src *.c
+recursive-include python *.py
+recursive-include tests *.c *.py
+recursive-include examples *.c *.py
+recursive-include docs *.css *.html *.md *.png

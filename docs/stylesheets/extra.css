@@ -1,0 +1,250 @@
+:root {
+  --md-text-font: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --perbacco-red: #9e2a2b;
+  --perbacco-red-dark: #7f2022;
+  --perbacco-line: #ded8cd;
+}
+
+[data-md-color-scheme="perbacco-light"] {
+  color-scheme: light;
+  --md-default-fg-color: #272321;
+  --md-default-fg-color--light: #5d5752;
+  --md-default-fg-color--lighter: #8c857e;
+  --md-default-fg-color--lightest: #ded8cd;
+  --md-default-bg-color: #f8f5ef;
+  --md-default-bg-color--light: #fbf9f4;
+  --md-primary-fg-color: #272321;
+  --md-primary-bg-color: #fffdf8;
+  --md-accent-fg-color: var(--perbacco-red);
+  --md-code-fg-color: #302b28;
+  --md-code-bg-color: #eee9df;
+  --md-typeset-a-color: var(--perbacco-red);
+}
+
+[data-md-color-scheme="perbacco-dark"] {
+  color-scheme: dark;
+  --md-default-fg-color: #f1ede5;
+  --md-default-fg-color--light: #c5beb4;
+  --md-default-fg-color--lighter: #948d84;
+  --md-default-fg-color--lightest: #45403c;
+  --md-default-bg-color: #1f1d1b;
+  --md-default-bg-color--light: #272421;
+  --md-primary-fg-color: #171513;
+  --md-primary-bg-color: #f7f2e9;
+  --md-accent-fg-color: #e17172;
+  --md-code-fg-color: #eee9df;
+  --md-code-bg-color: #2b2825;
+  --md-typeset-a-color: #e17172;
+  --perbacco-line: #45403c;
+}
+
+html {
+  scroll-behavior: auto;
+}
+
+.md-header,
+.md-tabs {
+  box-shadow: none;
+}
+
+.md-header {
+  border-bottom: 1px solid color-mix(in srgb, var(--md-primary-bg-color) 18%, transparent);
+}
+
+.md-tabs {
+  border-bottom: 1px solid var(--perbacco-line);
+}
+
+.md-grid {
+  max-width: 76rem;
+}
+
+.md-content__inner {
+  max-width: 52rem;
+  margin-inline: auto;
+  padding-bottom: 4rem;
+}
+
+.md-typeset {
+  font-size: 0.78rem;
+  line-height: 1.7;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3 {
+  color: var(--md-default-fg-color);
+  font-weight: 650;
+  letter-spacing: -0.025em;
+}
+
+.md-typeset h1 {
+  margin-bottom: 1rem;
+}
+
+.md-typeset a {
+  text-decoration-thickness: 0.06em;
+  text-underline-offset: 0.16em;
+}
+
+.md-typeset a:hover {
+  color: var(--perbacco-red-dark);
+}
+
+.md-typeset code {
+  border: 1px solid color-mix(in srgb, var(--md-default-fg-color) 10%, transparent);
+  border-radius: 0.2rem;
+}
+
+.md-typeset pre > code {
+  padding: 1rem 1.1rem;
+}
+
+.md-typeset table:not([class]) {
+  border: 1px solid var(--perbacco-line);
+  box-shadow: none;
+}
+
+.md-typeset table:not([class]) th {
+  background: color-mix(in srgb, var(--md-default-fg-color) 5%, transparent);
+}
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-width: 0 0 0 0.18rem;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+:focus-visible {
+  outline: 0.18rem solid var(--md-accent-fg-color) !important;
+  outline-offset: 0.16rem;
+}
+
+.landing .md-content__inner {
+  max-width: 64rem;
+}
+
+.perbacco-hero {
+  padding: 3.8rem 0 2.5rem;
+  border-bottom: 1px solid var(--perbacco-line);
+}
+
+.perbacco-kicker {
+  margin: 0 0 0.8rem;
+  color: var(--md-accent-fg-color);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.perbacco-hero h1 {
+  max-width: 15ch;
+  margin: 0;
+  font-size: clamp(2.2rem, 7vw, 4.5rem);
+  line-height: 0.98;
+  letter-spacing: -0.055em;
+}
+
+.perbacco-lede {
+  max-width: 48rem;
+  margin: 1.4rem 0 0;
+  color: var(--md-default-fg-color--light);
+  font-size: clamp(1rem, 2vw, 1.25rem);
+  line-height: 1.55;
+}
+
+.perbacco-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  margin-top: 1.8rem;
+}
+
+.md-typeset .perbacco-button {
+  display: inline-block;
+  padding: 0.55rem 0.9rem;
+  border: 1px solid var(--perbacco-red);
+  border-radius: 0.2rem;
+  background: var(--perbacco-red);
+  color: #fffaf4;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.md-typeset .perbacco-button:hover {
+  border-color: var(--perbacco-red-dark);
+  background: var(--perbacco-red-dark);
+  color: #ffffff;
+}
+
+.md-typeset .perbacco-button--quiet {
+  background: transparent;
+  color: var(--md-default-fg-color);
+}
+
+.md-typeset .perbacco-button--quiet:hover {
+  color: #ffffff;
+}
+
+.perbacco-section {
+  padding-top: 2.5rem;
+}
+
+.perbacco-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.perbacco-card {
+  padding: 1.1rem 1.15rem;
+  border: 1px solid var(--perbacco-line);
+  background: color-mix(in srgb, var(--md-default-bg-color) 88%, var(--md-default-fg-color) 2%);
+}
+
+.perbacco-card h3 {
+  margin: 0 0 0.35rem;
+}
+
+.perbacco-card p {
+  margin: 0;
+  color: var(--md-default-fg-color--light);
+}
+
+.perbacco-flow {
+  display: grid;
+  grid-template-columns: repeat(7, auto);
+  align-items: center;
+  gap: 0.55rem;
+  margin: 1.2rem 0;
+}
+
+.perbacco-flow__step {
+  padding: 0.75rem;
+  border: 1px solid var(--perbacco-line);
+  text-align: center;
+}
+
+.perbacco-flow__arrow {
+  color: var(--md-accent-fg-color);
+  font-weight: 700;
+}
+
+@media screen and (max-width: 44.984375em) {
+  .perbacco-hero {
+    padding-top: 2.4rem;
+  }
+
+  .perbacco-grid,
+  .perbacco-flow {
+    grid-template-columns: 1fr;
+  }
+
+  .perbacco-flow__arrow {
+    transform: rotate(90deg);
+    text-align: center;
+  }
+}
