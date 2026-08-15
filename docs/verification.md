@@ -21,6 +21,8 @@ uv run python -m unittest discover -s tests -p 'test_*.py' -v
 - strict C99 core suite: pass
 - standard-library environment: 24 Python tests discovered; 22 pass and 2
   optional-backend tests skip
+- Python 3.10.17 compatibility environment: the same 24 tests are discovered;
+  22 pass and 2 optional-backend tests skip
 - project environment with igraph and Leiden: 24 Python tests pass
 - ABI export checks: pass
 - deterministic randomized scheduler checks: pass

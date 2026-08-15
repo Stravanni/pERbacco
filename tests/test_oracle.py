@@ -4,7 +4,6 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from typing import Self
 from unittest.mock import patch
 
 from perbacco.oracle import EntityView, OpenAICompatibleOracle, OracleProtocolError
@@ -14,7 +13,7 @@ class _FakeResponse:
     def __init__(self, value: dict[str, object]):
         self.value = value
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> _FakeResponse:  # noqa: PYI034 - Python 3.10 compatibility
         return self
 
     def __exit__(self, *_args: object) -> None:

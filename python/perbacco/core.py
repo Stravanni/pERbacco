@@ -5,7 +5,6 @@ import math
 from collections.abc import Hashable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Self
 
 from . import _native
 
@@ -593,7 +592,7 @@ class Engine:
             _native.lib.pb_engine_free(self._handle)
             self._handle = _native.EnginePointer()
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> Engine:  # noqa: PYI034 - Python 3.10 has no typing.Self
         """Return this engine for context-manager use."""
         return self
 
